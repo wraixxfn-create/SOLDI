@@ -1,5 +1,7 @@
 import type { FieldId, FieldStats } from '../core/field.ts';
 import type { SectorConfig, TerrainSource, EnvironmentalPulse } from '../core/sim/sector.ts';
+import type { EcosystemRule } from '../core/sim/rules.ts';
+import type { ResourceFields, WorldResourceConfig } from '../core/sim/resources.ts';
 import type { SpeciesId, SpeciesTraits } from '../core/sim/species.ts';
 import type { Barrier, WorldSnapshot } from '../core/sim/world.ts';
 import type { ProbeState, PopulationSample } from '../core/sim/metrics.ts';
@@ -35,13 +37,16 @@ export interface Environment {
   readonly width: number;
   readonly height: number;
   readonly baseline: Readonly<Record<FieldId, number>>;
+  readonly resources: WorldResourceConfig;
   readonly sources: readonly TerrainSource[];
   readonly pulses: readonly EnvironmentalPulse[];
+  readonly rules: readonly EcosystemRule[];
 }
 
 /** Mutable state of the environmental scalar grids during a mission. */
 export interface EnvironmentState {
   readonly fields: Record<FieldId, ScalarField>;
+  readonly resources: ResourceFields;
 }
 
 /** A Codex rule/proposition is content, not a mutable answer. */
@@ -96,6 +101,7 @@ export interface SimulationState {
   readonly stability: number;
   readonly barriers: readonly Barrier[];
   readonly fields: Readonly<Record<FieldId, ScalarField>>;
+  readonly resources: ResourceFields;
   readonly biomassFields: ReadonlyMap<SpeciesId, ScalarField>;
   readonly extinctions: readonly SpeciesId[];
 }
@@ -107,6 +113,7 @@ export interface World {
   readonly tick: number;
   readonly agents: readonly Organism[];
   readonly fields: Readonly<Record<FieldId, ScalarField>>;
+  readonly resources: ResourceFields;
   step(): void;
   run(ticks: number): void;
   snapshot(): WorldSnapshot;

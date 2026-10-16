@@ -4,10 +4,10 @@ Living record of what exists, what is proven, and what is still open. Updated at
 work session, per the project's working agreement. The source of truth for behaviour is the code; for
 rules and rationale it is `docs/DESIGN.md`, `docs/ARCHITECTURE.md` and `docs/DECISIONS.md`.
 
-**Status:** the game is **playable end to end in a browser**: simulation core, species catalogue,
-campaign sectors, deduction layer, renderer, UI shell, game loop, grading and persistence are all
-implemented and under test. Remaining work is breadth of verification and balance, not missing
-features — see *Open issues*.
+**Status:** the game is **playable end to end in a browser**. The ecology core now has a validated
+world/resource model, four starter strategies, explicit seven-phase turns, stable seeded replay and a
+safe declarative rule engine; the 12-species campaign, Codex, renderer, UI, grading and persistence
+remain under test. Remaining work is breadth of manual verification and balance — see *Open issues*.
 
 ---
 
@@ -19,11 +19,13 @@ features — see *Open issues*.
 | Numeric helpers | `src/core/math.ts` | Done | `tests/core/math.test.ts` (15) |
 | Error taxonomy | `src/core/errors.ts` | Done | exercised across the suite |
 | Scalar fields | `src/core/field.ts` | Done | `tests/core/field.test.ts` (21) |
-| Fitness / tolerance law | `src/core/sim/species.ts` | Done | `tests/core/species.test.ts` (17) |
-| Sector climate, terrain, validation | `src/core/sim/sector.ts` | Done | `tests/core/sector.test.ts` (19) |
-| World simulation | `src/core/sim/world.ts` | Done | `tests/core/world.test.ts` (23) |
+| Fitness / tolerance and strategies | `src/core/sim/species.ts` | Done | `tests/core/species.test.ts` (17) |
+| Validated world, climate, territory | `src/core/sim/sector.ts` | Done | `tests/core/sector.test.ts` (19), `tests/core/ecology.test.ts` |
+| Water and mineral stocks | `src/core/sim/resources.ts` | Done | `tests/core/ecology.test.ts` |
+| Safe ecological rule DSL | `src/core/sim/rules.ts` | Done | `tests/core/rules.test.ts` (5), domain malformed-input test |
+| Seven-phase world simulation | `src/core/sim/world.ts` | Done | `tests/core/world.test.ts` (23), `tests/core/determinism.test.ts` (3) |
 | Events, metrics, probes | `src/core/sim/events.ts`, `metrics.ts` | Done | via world/sector tests |
-| Species catalogue (12) | `src/content/species.ts` | Done | trait-range + diet integrity tests |
+| Species catalogues (12 campaign + 4 starter strategies) | `src/content/species.ts`, `starter-ecosystem.ts` | Done | trait-range, ecology and viability tests |
 | Campaign sectors (5) | `src/content/sectors.ts` | Done | validation + viability tests |
 | Deduction layer | `src/content/laws.ts` | Done | `tests/core/laws.test.ts` (21) |
 | Law fairness audit | `src/content/law-fairness.ts` | Done | same suite (ADR-008) |
@@ -39,25 +41,24 @@ features — see *Open issues*.
 | Audio (synth, no assets) | `src/game/audio.ts` | Done | no-op path + settings status |
 | App state | `src/game/state.ts` | Done | via UI tests |
 | Palettes / contrast | `src/render/palettes.ts` | Done | via renderer tests |
-| Canvas renderer | `src/render/renderer.ts` | Done | `tests/render/renderer.test.ts` (8) |
-| UI shell + a11y | `src/ui/app.ts`, `ui/a11y.ts` | Done | `tests/ui/app.test.ts` (17) |
+| Canvas renderer | `src/render/renderer.ts` | Done | `tests/render/renderer.test.ts` (9), including no gameplay mutation |
+| UI shell + a11y | `src/ui/app.ts`, `ui/a11y.ts` | Done | `tests/ui/app.test.ts` (18) |
 | Shell markup / boot | `index.html`, `src/main.ts`, `styles.css` | Done | mounted by the UI tests; real dev server exercised |
 
-**Test totals:** 11 files, 166 tests (`npm test`, as verified 2026-10-16). Typecheck and lint clean (0 errors, 0 warnings).
+**Test totals:** 14 files, 186 tests (`npm test`, verified 2026-10-16). Typecheck and lint clean (0 errors, 0 warnings).
 
 ## 2. Evidence the world works
 
-Executed, in the state committed with this document:
+Executed against the current worktree for this update:
 
 - `npx tsc --noEmit -p tsconfig.json` → clean.
 - `npx eslint .` → clean (0 errors, 0 warnings).
-- `npm run verify` → **166 passed / 11 files**, typecheck/lint clean, production build succeeded (54.0 s for tests in this run; the five sector viability runs are ~31 s).
-- `npm run balance -- 0 '' --seeds=3` → **no local extinctions** in 15 sector/seed runs, every species
-  of every sector still alive at the end of its survey horizon.
-- `npm run laws` → every proposition unambiguous, verifiable with the instruments the sector ships,
-  and consistent with observed births (0 unfair).
-- `npm run build` → `dist/index.html` 6.14 kB, CSS 6.77 kB, JS 123.74 kB (40.37 kB gzipped), 28 modules,
-  zero assets — the whole game is HTML + JS + CSS.
+- `npm run verify` → **186 passed / 14 files**, typecheck/lint clean, production build succeeded (five campaign viability runs included).
+- `npm run balance -- 0 '' --seeds=3` → **no local extinctions** in 15 sector/seed runs after the phase refactor; every population stayed above zero through its survey horizon.
+- `npm run laws` → zero unfair propositions across all five campaign sectors; the audit checks
+  unambiguity, available instruments, in-band fitness, trophic measurements and observed viability.
+- `npm run build` → `dist/index.html` 6.14 kB, CSS 6.77 kB, JS 147.79 kB (46.74 kB gzipped), 30 modules,
+  zero external assets — the whole game is HTML + JS + CSS.
 - `npm run dev` → Vite dev server on `0.0.0.0:5173`; `index.html`, `src/main.ts`, the UI modules and
   the stylesheet are all served (HTTP 200), so the game boots in a browser.
 
@@ -67,7 +68,11 @@ AUR-3/KEL-2/FER-7/ORS-9/TAU-0 — all populations above zero, all with recorded 
 
 ## 3. Content inventory
 
-**Species (12):** AUR-3 Aurelia thermica (autotroph), FER-7 Ferrax repens (grazer), KEL-2 Kelpia
+**Starter strategies (4):** PHY-1 photosynthetic producer, PRE-1 predator, DEC-1 decomposer (mineralizes
+organic biomass), SYM-1 symbiont (mutual energy benefit with PHY-1). `ECO-0 Genesis Terrarium` is the
+explicit validated headless template; the campaign roster remains separate.
+
+**Campaign species (12):** AUR-3 Aurelia thermica (autotroph), FER-7 Ferrax repens (grazer), KEL-2 Kelpia
 umbrosa (autotroph, dim/cold), VEL-5 Vellum vagans (grazer, migrator), ORS-9 Orsax vorax (predator),
 VOX-1 Voxa lucida (autotroph, bright), SCU-4 Scuta (grazer, dim), MYC-8 Mycorrhiza pallens (filter,
 aphotic), ORP-6 Orpa ustulata (autotroph, hot), CAL-5 Calyx fervens (grazer, `perish`), GLI-3 Glirra
@@ -99,7 +104,7 @@ Ordered by what would stop a release first.
    `tests/core/sector.test.ts` covers exactly that case.
 5. ~~**DOM tests are not written yet.**~~ **Closed 2026-10-16.** `tests/ui/app.test.ts` (18 tests)
    mounts the real `index.html` in jsdom and drives the game through its dispatch API;
-   `tests/render/renderer.test.ts` (8 tests) drives the renderer against a recording 2D context.
+   `tests/render/renderer.test.ts` (9 tests) drives the renderer against a recording 2D context and compares rendered/headless simulation state.
 6. **Balance is measured on 3 seeds.** Extinction-free on the sector's own seed and two derived seeds;
    a wider sweep (`--seeds=20`) is recommended before release, and the harness exits non-zero on
    collapse so it can be wired into CI.
@@ -107,9 +112,9 @@ Ordered by what would stop a release first.
    sector's budget is now validated at import time (`startingCharge`, `startingIntegrity`,
    `biomassTarget` bands measured from real runs), but the *playability* of the later sectors — KEL-4
    and ORP-2 in particular — has not been confirmed by a human session.
-8. **Throughput headroom.** Heaviest sector (TAU-7) runs ~260–600 ticks/s headless. The renderer
-   measures its own frame cost and drops quality above 12 ms, but real device timings (and the cost of
-   panel rebuilds during play) have not been profiled in a browser.
+8. **Throughput headroom.** After the phase refactor TAU-7 ran ~397–459 ticks/s in the three-seed
+   balance sweep. The renderer measures its own frame cost and drops quality above 12 ms, but real
+   device timings (and panel rebuild cost) have not been profiled in a browser.
 9. **Shipped-string language undecided.** All code, comments and player-facing strings are currently
    English. If the game should ship in Italian, the strings need extracting into a single content
    module; this is cheap now and expensive later. Awaiting a decision that only the owner can make.

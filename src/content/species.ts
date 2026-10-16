@@ -33,6 +33,10 @@ type TraitInput = Partial<SpeciesTraits> & {
 
 const DEFAULTS = {
   dietKind: 'none' as DietKind,
+  strategy: 'photosynthetic' as SpeciesTraits['strategy'],
+  resourceNeeds: { waterPerEnergy: 0, nutrientsPerEnergy: 0 },
+  decompositionYield: 0,
+  symbiosis: null,
   diet: [] as readonly SpeciesId[],
   stressResponse: 'dormant' as StressResponse,
   maxEnergy: 100,
@@ -58,8 +62,18 @@ const DEFAULTS = {
   variance: 0.08,
 } satisfies Omit<SpeciesTraits, 'name' | 'code' | 'role' | 'tolerance'>;
 
+// eslint-disable-next-line complexity -- one canonical builder validates all shared species invariants.
 function define(input: TraitInput): SpeciesDefinition {
-  const traits: SpeciesTraits = { ...DEFAULTS, ...input };
+  const inferredStrategy = input.dietKind === 'predation'
+    ? 'predatory'
+    : input.dietKind === 'biomass'
+      ? input.role === 'filter' ? 'filter' : 'grazer'
+      : 'photosynthetic';
+  const traits: SpeciesTraits = {
+    ...DEFAULTS,
+    ...input,
+    strategy: input.strategy ?? inferredStrategy,
+  };
   assertContent(traits.name.length > 0, 'species needs a name');
   assertContent(/^[A-Z]{3}-\d$/.test(traits.code), `bad species code "${traits.code}"`, {
     code: traits.code,
@@ -88,6 +102,29 @@ function define(input: TraitInput): SpeciesDefinition {
       `species ${traits.code}: ${field} fragile threshold must be in [0, 1]`,
     );
   }
+  assertContent(
+    Number.isFinite(traits.resourceNeeds.waterPerEnergy) && traits.resourceNeeds.waterPerEnergy >= 0 &&
+      Number.isFinite(traits.resourceNeeds.nutrientsPerEnergy) && traits.resourceNeeds.nutrientsPerEnergy >= 0,
+    `species ${traits.code}: resource needs must be finite and non-negative`,
+  );
+  assertContent(
+    Number.isFinite(traits.decompositionYield) && traits.decompositionYield >= 0 && traits.decompositionYield <= 1,
+    `species ${traits.code}: decomposition yield must be in [0, 1]`,
+  );
+  assertContent(
+    traits.strategy === 'decomposer'
+      ? traits.dietKind === 'biomass' && traits.decompositionYield > 0
+      : traits.decompositionYield === 0,
+    `species ${traits.code}: only a decomposer may mineralize biomass`,
+  );
+  assertContent(
+    traits.strategy === 'symbiotic'
+      ? traits.symbiosis !== null && traits.symbiosis.partner.length > 0 &&
+        traits.symbiosis.radius > 0 && traits.symbiosis.selfEnergyBonus >= 0 &&
+        traits.symbiosis.partnerEnergyBonus >= 0
+      : traits.symbiosis === null,
+    `species ${traits.code}: symbiosis parameters must match its strategy`,
+  );
   assertContent(traits.maturity < traits.lifespan, `species ${traits.code}: must mature before dying`);
   assertContent(
     traits.startEnergy < traits.maxEnergy,
@@ -456,6 +493,134 @@ export const TAUROS = define({
     light: { ideal: 0.55, width: 0.86, fragile: 0.22 },
   },
 });
+
+/** Starter ecology demonstrating the four requested simulation strategies. */
+export const STARTER_PHOTOSYNTHETIC = define({
+  name: 'Phytora primaria',
+  code: 'PHY-1',
+  role: 'photoautotroph',
+  strategy: 'photosynthetic',
+  dietKind: 'none',
+  stressResponse: 'dormant',
+  growthRate: 0.42,
+  resourceNeeds: { waterPerEnergy: 0.0025, nutrientsPerEnergy: 0.004 },
+  metabolism: 0.055,
+  startEnergy: 44,
+  reproEnergy: 60,
+  reproCost: 18,
+  reproCooldown: 180,
+  maturity: 75,
+  lifespan: 2200,
+  speed: 0.025,
+  wander: 0.3,
+  sense: 3.5,
+  color: '#45c98b',
+  tolerance: {
+    temperature: { ideal: 298, width: 78, fragile: 0.25 },
+    humidity: { ideal: 0.6, width: 0.42, fragile: 0.22 },
+    light: { ideal: 0.65, width: 0.5, fragile: 0.2 },
+  },
+});
+
+export const STARTER_PREDATOR = define({
+  name: 'Praedon cursor',
+  code: 'PRE-1',
+  role: 'carnivore',
+  strategy: 'predatory',
+  dietKind: 'predation',
+  diet: ['SYM-1'],
+  stressResponse: 'migrate',
+  captureChance: 0.48,
+  intakeRate: 0.34,
+  metabolism: 0.065,
+  startEnergy: 48,
+  reproEnergy: 66,
+  reproCost: 20,
+  reproCooldown: 270,
+  maturity: 120,
+  lifespan: 2600,
+  speed: 0.11,
+  wander: 0.72,
+  sense: 8,
+  color: '#df625b',
+  tolerance: {
+    temperature: { ideal: 300, width: 92, fragile: 0.23 },
+    humidity: { ideal: 0.54, width: 0.5, fragile: 0.22 },
+    light: { ideal: 0.5, width: 0.68, fragile: 0.2 },
+  },
+});
+
+export const STARTER_DECOMPOSER = define({
+  name: 'Detriton mineralis',
+  code: 'DEC-1',
+  role: 'filter',
+  strategy: 'decomposer',
+  dietKind: 'biomass',
+  diet: ['PHY-1', 'PRE-1', 'SYM-1'],
+  decompositionYield: 0.55,
+  stressResponse: 'dormant',
+  intakeRate: 0.32,
+  metabolism: 0.048,
+  startEnergy: 42,
+  reproEnergy: 58,
+  reproCost: 17,
+  reproCooldown: 220,
+  maturity: 100,
+  lifespan: 2800,
+  speed: 0.035,
+  wander: 0.4,
+  sense: 5,
+  color: '#bd9b70',
+  tolerance: {
+    temperature: { ideal: 292, width: 90, fragile: 0.2 },
+    humidity: { ideal: 0.7, width: 0.4, fragile: 0.2 },
+    light: { ideal: 0.2, width: 0.52, fragile: 0.18 },
+  },
+});
+
+export const STARTER_SYMBIONT = define({
+  name: 'Symbia concordis',
+  code: 'SYM-1',
+  role: 'photoautotroph',
+  strategy: 'symbiotic',
+  dietKind: 'none',
+  growthRate: 0.29,
+  resourceNeeds: { waterPerEnergy: 0.0018, nutrientsPerEnergy: 0.003 },
+  symbiosis: {
+    partner: 'PHY-1',
+    radius: 2.5,
+    selfEnergyBonus: 0.055,
+    partnerEnergyBonus: 0.035,
+  },
+  stressResponse: 'dormant',
+  metabolism: 0.05,
+  startEnergy: 42,
+  reproEnergy: 58,
+  reproCost: 17,
+  reproCooldown: 195,
+  maturity: 80,
+  lifespan: 2300,
+  speed: 0.03,
+  wander: 0.38,
+  sense: 4,
+  color: '#78d8c0',
+  tolerance: {
+    temperature: { ideal: 298, width: 82, fragile: 0.23 },
+    humidity: { ideal: 0.62, width: 0.4, fragile: 0.2 },
+    light: { ideal: 0.58, width: 0.52, fragile: 0.18 },
+  },
+});
+
+export const STARTER_SPECIES: readonly SpeciesDefinition[] = [
+  STARTER_PHOTOSYNTHETIC,
+  STARTER_PREDATOR,
+  STARTER_DECOMPOSER,
+  STARTER_SYMBIONT,
+];
+
+export const STARTER_SPECIES_BY_ID: ReadonlyMap<SpeciesId, SpeciesDefinition> = new Map(
+  STARTER_SPECIES.map((definition) => [definition.id, definition]),
+);
 
 export const SPECIES_LIST: readonly SpeciesDefinition[] = [
   AURELIA,

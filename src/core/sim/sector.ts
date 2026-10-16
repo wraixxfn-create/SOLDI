@@ -2,6 +2,8 @@ import { ScalarField, FIELD_IDS, type FieldId, type FieldStats } from '../field.
 import { clamp } from '../math.ts';
 import { ContentError } from '../errors.ts';
 import { fitnessAt, type FieldDistribution, type SpeciesDefinition, type SpeciesId } from './species.ts';
+import { RESOURCE_LIMITS, type WorldResourceConfig } from './resources.ts';
+import { parseRuleSet, type EcosystemRule } from './rules.ts';
 
 /**
  * Sector configuration: the complete, authored description of one mission world.
@@ -79,14 +81,19 @@ export interface SectorConfig {
   readonly brief: string;
   readonly objective: string;
 
+  /** Finite territory in grid cells. Organisms reflect at its closed outer boundary. */
   readonly width: number;
   readonly height: number;
   /** Base seed for the sector's own world instance. */
   readonly seed: number;
 
   readonly baseline: Readonly<Record<FieldId, number>>;
+  /** Initial spatial water/nutrient stocks and their per-turn environmental rates. */
+  readonly resources: WorldResourceConfig;
   readonly sources: readonly TerrainSource[];
   readonly pulses: readonly EnvironmentalPulse[];
+  /** Declarative, validated ecological/environment rules; empty means no authored rules. */
+  readonly rules: readonly EcosystemRule[];
 
   readonly roster: readonly SpeciesId[];
   readonly initialPopulations: Readonly<Record<SpeciesId, number>>;
@@ -113,6 +120,9 @@ export interface SectorConfig {
   readonly difficulty: 1 | 2 | 3 | 4 | 5;
 }
 
+/** Full explicit configuration consumed by `World`; campaign-only fields live on the same record. */
+export type WorldConfig = SectorConfig;
+
 export interface FieldRange {
   readonly min: number;
   readonly max: number;
@@ -126,6 +136,10 @@ export const FIELD_LIMITS: Readonly<Record<FieldId, FieldRange>> = Object.freeze
   humidity: { min: 0, max: 1 },
   light: { min: 0, max: 1 },
 });
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 
 /** Target value a terrain source relaxes toward at its epicentre. */
 export function sourceTarget(config: SectorConfig, source: TerrainSource): number {
@@ -158,7 +172,7 @@ export function buildFields(config: SectorConfig): Readonly<Record<FieldId, Scal
     humidity: new ScalarField(config.width, config.height, config.baseline.humidity),
     light: new ScalarField(config.width, config.height, config.baseline.light),
   };
-  for (const source of config.sources) {
+  for (const source of [...config.sources].sort((a, b) => compareText(a.id, b.id))) {
     // The initial placement is a full-strength blend so the authored terrain is visible at tick 0;
     // afterwards the tick loop re-applies it at `persistence` weight to hold it against diffusion.
     applySource(fields, config, source, 1);
@@ -187,7 +201,7 @@ export function applyScheduledPulses(
   tick: number,
 ): readonly EnvironmentalPulse[] {
   const fired: EnvironmentalPulse[] = [];
-  for (const pulse of config.pulses) {
+  for (const pulse of [...config.pulses].sort((a, b) => compareText(a.id, b.id))) {
     if (pulse.period <= 0) continue;
     // Floored modulo: robust for ticks before the first phase as well as after it.
     if ((((tick - pulse.phase) % pulse.period) + pulse.period) % pulse.period !== 0) continue;
@@ -204,7 +218,7 @@ export function advanceFields(
   diffusion: number,
   relaxation: number,
 ): void {
-  for (const source of config.sources) {
+  for (const source of [...config.sources].sort((a, b) => compareText(a.id, b.id))) {
     applySource(fields, config, source, source.persistence);
   }
   for (const id of FIELD_IDS) {
@@ -344,86 +358,175 @@ export function initialFieldStats(config: SectorConfig): Record<FieldId, FieldSt
 }
 
 /**
- * Validates a sector configuration. Returns every problem it finds (instead of throwing on the
- * first) so the UI and the test suite can report them together; `assertValidSector` throws.
+ * Validates the complete simulation input independently of mission/campaign policy. `World` calls
+ * this gate for every instance, including custom worlds; `validateSector` adds the campaign rules.
+ */
+// eslint-disable-next-line complexity -- validation collects every world-level issue in a single report.
+export function validateWorldConfig(
+  config: SectorConfig,
+  speciesById: ReadonlyMap<SpeciesId, SpeciesDefinition>,
+): string[] {
+  const problems: string[] = [];
+  const need: Need = (condition, message) => {
+    if (!condition) problems.push(message);
+  };
+
+  need(typeof config.id === 'string' && config.id.length > 0, 'world id must not be empty');
+  need(Number.isInteger(config.width) && config.width >= 16 && config.width <= 128,
+    `world ${config.id}: width must be an integer in [16, 128]`);
+  need(Number.isInteger(config.height) && config.height >= 12 && config.height <= 128,
+    `world ${config.id}: height must be an integer in [12, 128]`);
+  need(Number.isInteger(config.seed), `world ${config.id}: seed must be an integer`);
+
+  for (const id of FIELD_IDS) {
+    const limits = FIELD_LIMITS[id];
+    const value = config.baseline?.[id];
+    need(Number.isFinite(value) && value >= limits.min && value <= limits.max,
+      `world ${config.id}: baseline ${id}=${value} outside [${limits.min}, ${limits.max}]`);
+  }
+
+  checkResources(config, need);
+  need(Array.isArray(config.roster) && config.roster.length > 0,
+    `world ${config.id}: roster must contain at least one species`);
+  const roster = Array.isArray(config.roster) ? checkRoster(config, speciesById, need) : new Set<string>();
+  checkSources(config, need);
+
+  const rules = parseRuleSet(config.rules, {
+    width: config.width,
+    height: config.height,
+    species: Array.isArray(config.roster) ? config.roster : [],
+  });
+  problems.push(...rules.issues.map((issue) => `world ${config.id}: ${issue}`));
+
+  // Avoid constructing dense fields from malformed dimensions, source records or baselines.
+  const safeDimensions = Number.isInteger(config.width) && config.width >= 16 && config.width <= 128 &&
+    Number.isInteger(config.height) && config.height >= 12 && config.height <= 128;
+  const safeBaselines = FIELD_IDS.every((id) => {
+    const value = config.baseline?.[id];
+    const limits = FIELD_LIMITS[id];
+    return Number.isFinite(value) && value >= limits.min && value <= limits.max;
+  });
+  const safeSources = Array.isArray(config.sources) && config.sources.every((source) =>
+    Boolean(source) && typeof source.id === 'string' && Object.hasOwn(TERRAIN_PROFILES, source.kind) &&
+    Number.isFinite(source.x) && Number.isFinite(source.y) && Number.isFinite(source.radius) &&
+    Number.isFinite(source.strength) && Number.isFinite(source.persistence));
+  if (safeDimensions && safeBaselines && safeSources) {
+    const sampledFields = buildFields(config);
+    checkPulses(config, sampledFields, need);
+    checkHabitability(config, speciesById, sampledFields, need);
+  }
+
+  // A consumer must have at least one reachable food species on this particular world's roster.
+  for (const id of roster) {
+    const definition = speciesById.get(id);
+    if (!definition) continue;
+    const traits = definition.traits;
+    need(Number.isFinite(traits.resourceNeeds.waterPerEnergy) && traits.resourceNeeds.waterPerEnergy >= 0 &&
+      Number.isFinite(traits.resourceNeeds.nutrientsPerEnergy) && traits.resourceNeeds.nutrientsPerEnergy >= 0,
+    `world ${config.id}: species "${id}" has invalid resource needs`);
+    if (traits.dietKind !== 'none') {
+      const available = traits.diet.filter((prey) => roster.has(prey));
+      need(available.length > 0,
+        `world ${config.id}: consumer "${id}" has none of its diet species on the roster`);
+    }
+    if (traits.strategy === 'decomposer') {
+      need(traits.dietKind === 'biomass' && Number.isFinite(traits.decompositionYield) &&
+        traits.decompositionYield > 0 && traits.decompositionYield <= 1,
+      `world ${config.id}: decomposer "${id}" needs a biomass diet and yield in (0, 1]`);
+    } else {
+      need(traits.decompositionYield === 0,
+        `world ${config.id}: non-decomposer "${id}" cannot mineralize biomass`);
+    }
+    if (traits.strategy === 'symbiotic') {
+      need(traits.symbiosis !== null && roster.has(traits.symbiosis.partner),
+        `world ${config.id}: symbiont "${id}" needs its configured partner on the roster`);
+    } else {
+      need(traits.symbiosis === null,
+        `world ${config.id}: only a symbiotic species may define a partner`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Campaign validation layers mission/economy requirements on top of the world model validation.
+ * Invalid input is reported as a full list so editors and import boundaries can repair it at once.
  */
 export function validateSector(
   config: SectorConfig,
   speciesById: ReadonlyMap<SpeciesId, SpeciesDefinition>,
 ): string[] {
-  const problems: string[] = [];
-  const need = (condition: boolean, message: string): void => {
+  const problems = validateWorldConfig(config, speciesById);
+  const need: Need = (condition, message) => {
     if (!condition) problems.push(message);
   };
 
-  need(config.id.length > 0, 'sector id must not be empty');
   need(Number.isInteger(config.index) && config.index >= 1, `sector ${config.id}: index must be >= 1`);
-  need(
-    Number.isInteger(config.width) && config.width >= 16 && config.width <= 128,
-    `sector ${config.id}: width must be an integer in [16, 128]`,
-  );
-  need(
-    Number.isInteger(config.height) && config.height >= 12 && config.height <= 128,
-    `sector ${config.id}: height must be an integer in [12, 128]`,
-  );
-  need(Number.isInteger(config.seed), `sector ${config.id}: seed must be an integer`);
   need(config.roster.length >= 2, `sector ${config.id}: needs at least two species`);
   need(config.startingCharge > 0, `sector ${config.id}: startingCharge must be positive`);
-  need(
-    Number.isInteger(config.startingIntegrity) && config.startingIntegrity > 0,
-    `sector ${config.id}: startingIntegrity must be a positive integer`,
-  );
-  need(
-    Number.isFinite(config.biomassTarget.min) && config.biomassTarget.min > 0,
-    `sector ${config.id}: biomassTarget.min must be positive`,
-  );
-  need(
-    Number.isFinite(config.biomassTarget.max) && config.biomassTarget.max > config.biomassTarget.min,
-    `sector ${config.id}: biomassTarget.max must exceed its min`,
-  );
-  need(config.surveyTicks >= 600, `sector ${config.id}: surveyTicks must allow a real experiment`);
+  need(Number.isInteger(config.startingIntegrity) && config.startingIntegrity > 0,
+    `sector ${config.id}: startingIntegrity must be a positive integer`);
+  need(Number.isFinite(config.biomassTarget.min) && config.biomassTarget.min > 0,
+    `sector ${config.id}: biomassTarget.min must be positive`);
+  need(Number.isFinite(config.biomassTarget.max) && config.biomassTarget.max > config.biomassTarget.min,
+    `sector ${config.id}: biomassTarget.max must exceed its min`);
+  need(Number.isInteger(config.surveyTicks) && config.surveyTicks >= 600,
+    `sector ${config.id}: surveyTicks must allow a real experiment`);
   need(config.instruments.length > 0, `sector ${config.id}: at least one instrument must be enabled`);
-  need(
-    config.difficulty >= 1 && config.difficulty <= 5,
-    `sector ${config.id}: difficulty must be in [1, 5]`,
-  );
+  need(config.difficulty >= 1 && config.difficulty <= 5,
+    `sector ${config.id}: difficulty must be in [1, 5]`);
 
-  for (const id of FIELD_IDS) {
-    const limits = FIELD_LIMITS[id];
-    const value = config.baseline[id];
-    need(
-      Number.isFinite(value) && value >= limits.min && value <= limits.max,
-      `sector ${config.id}: baseline ${id}=${value} outside [${limits.min}, ${limits.max}]`,
-    );
-  }
-
-  const roster = checkRoster(config, speciesById, need);
-  checkSources(config, need);
-  // Every rule below measures the *really constructed* fields, not the authored numbers.
-  const sampledFields = buildFields(config);
-  checkPulses(config, sampledFields, need);
-  checkHabitability(config, speciesById, sampledFields, need);
-
-  // A survey must start with enough organisms to observe: at least 1.5 % of the grid populated.
-  const total = Object.values(config.initialPopulations).reduce((a, b) => a + b, 0);
-  need(
-    total >= Math.round(config.width * config.height * 0.015),
-    `sector ${config.id}: initial population (${total}) is too sparse for a survey`,
-  );
-
-  // Every consumer on the roster must have at least one of its diet species present, otherwise its
-  // trophic law would be unobservable. Autotrophs are exempt.
-  for (const species of config.roster) {
-    const def = speciesById.get(species);
-    if (!def || def.traits.dietKind === 'none') continue;
-    const available = def.traits.diet.filter((prey) => roster.has(prey));
-    need(
-      available.length > 0,
-      `sector ${config.id}: consumer "${species}" has none of its diet species on the roster`,
-    );
-  }
-
+  const total = Object.values(config.initialPopulations).reduce((sum, amount) => sum + amount, 0);
+  need(total >= Math.round(config.width * config.height * 0.015),
+    `sector ${config.id}: initial population (${total}) is too sparse for a survey`);
   return problems;
+}
+
+/** Throws on invalid simulation configuration; used at the World construction boundary. */
+export function assertValidWorldConfig(
+  config: SectorConfig,
+  speciesById: ReadonlyMap<SpeciesId, SpeciesDefinition>,
+): void {
+  const problems = validateWorldConfig(config, speciesById);
+  if (problems.length === 0) return;
+  const summary = problems.slice(0, 4).join('; ');
+  const more = problems.length > 4 ? ` (+${problems.length - 4} more)` : '';
+  throw new ContentError(`Invalid world "${config.id}": ${summary}${more}`, { problems });
+}
+
+// eslint-disable-next-line complexity -- resource units and their allowed rates stay adjacent to the schema.
+function checkResources(config: SectorConfig, need: Need): void {
+  const resources = config.resources;
+  if (!resources || typeof resources !== 'object') {
+    need(false, `world ${config.id}: resources must define water and nutrients`);
+    return;
+  }
+  const water = resources.water;
+  const nutrients = resources.nutrients;
+  if (!water || typeof water !== 'object') {
+    need(false, `world ${config.id}: resources.water must be configured`);
+  } else {
+    need(Number.isFinite(water.initial) && water.initial >= RESOURCE_LIMITS.water.min &&
+      water.initial <= RESOURCE_LIMITS.water.max,
+    `world ${config.id}: initial water must be in [0, 1]`);
+    need(Number.isFinite(water.recharge) && water.recharge >= 0 && water.recharge <= 1,
+      `world ${config.id}: water recharge must be in [0, 1] per turn`);
+    need(Number.isFinite(water.evaporation) && water.evaporation >= 0 && water.evaporation <= 1,
+      `world ${config.id}: water evaporation must be in [0, 1] per turn`);
+    need(Number.isFinite(water.diffusion) && water.diffusion >= 0 && water.diffusion <= 0.25,
+      `world ${config.id}: water diffusion must be in [0, 0.25]`);
+  }
+  if (!nutrients || typeof nutrients !== 'object') {
+    need(false, `world ${config.id}: resources.nutrients must be configured`);
+  } else {
+    need(Number.isFinite(nutrients.initial) && nutrients.initial >= RESOURCE_LIMITS.nutrients.min &&
+      nutrients.initial <= RESOURCE_LIMITS.nutrients.max,
+    `world ${config.id}: initial nutrients must be in [0, 4] units per cell`);
+    need(Number.isFinite(nutrients.regeneration) && nutrients.regeneration >= 0 && nutrients.regeneration <= 0.1,
+      `world ${config.id}: nutrient regeneration must be in [0, 0.1] units per cell per turn`);
+    need(Number.isFinite(nutrients.diffusion) && nutrients.diffusion >= 0 && nutrients.diffusion <= 0.25,
+      `world ${config.id}: nutrient diffusion must be in [0, 0.25]`);
+  }
 }
 
 type Need = (condition: boolean, message: string) => void;
@@ -436,6 +539,14 @@ function checkRoster(
 ): Set<SpeciesId> {
   const known = new Set(speciesById.keys());
   const seen = new Set<SpeciesId>();
+  if (!config.initialPopulations || typeof config.initialPopulations !== 'object') {
+    need(false, `world ${config.id}: initialPopulations must be an object`);
+    return seen;
+  }
+  if (!config.populationCaps || typeof config.populationCaps !== 'object') {
+    need(false, `world ${config.id}: populationCaps must be an object`);
+    return seen;
+  }
   for (const species of config.roster) {
     need(known.has(species), `sector ${config.id}: unknown species "${species}"`);
     need(!seen.has(species), `sector ${config.id}: species "${species}" listed twice`);
@@ -462,21 +573,37 @@ function checkRoster(
 
 /** Terrain sources: unique ids, inside the grid, with a real radius, strength and persistence. */
 function checkSources(config: SectorConfig, need: Need): void {
+  if (!Array.isArray(config.sources)) {
+    need(false, `world ${config.id}: sources must be an array`);
+    return;
+  }
   const ids = new Set<string>();
   for (const source of config.sources) {
-    need(!ids.has(source.id), `sector ${config.id}: duplicate terrain source id "${source.id}"`);
-    ids.add(source.id);
+    if (!source || typeof source !== 'object') {
+      need(false, `world ${config.id}: terrain source must be an object`);
+      continue;
+    }
+    need(typeof source.id === 'string' && source.id.length > 0,
+      `world ${config.id}: terrain source id must not be empty`);
+    if (typeof source.id === 'string') {
+      need(!ids.has(source.id), `sector ${config.id}: duplicate terrain source id "${source.id}"`);
+      ids.add(source.id);
+    }
+    need(Object.hasOwn(TERRAIN_PROFILES, source.kind),
+      `world ${config.id}: terrain source "${source.id}" has an unknown kind`);
     need(
-      source.x >= 0 && source.x < config.width && source.y >= 0 && source.y < config.height,
+      Number.isFinite(source.x) && Number.isFinite(source.y) && source.x >= 0 &&
+        source.x < config.width && source.y >= 0 && source.y < config.height,
       `sector ${config.id}: terrain source "${source.id}" is outside the grid`,
     );
-    need(source.radius > 0, `sector ${config.id}: terrain source "${source.id}" needs a radius`);
+    need(Number.isFinite(source.radius) && source.radius > 0,
+      `sector ${config.id}: terrain source "${source.id}" needs a radius`);
     need(
       Number.isFinite(source.strength) && source.strength !== 0,
       `sector ${config.id}: terrain source "${source.id}" needs a non-zero strength`,
     );
     need(
-      source.persistence > 0 && source.persistence <= 0.5,
+      Number.isFinite(source.persistence) && source.persistence > 0 && source.persistence <= 0.5,
       `sector ${config.id}: terrain source "${source.id}" persistence must be in (0, 0.5]`,
     );
   }
@@ -489,27 +616,51 @@ function checkSources(config: SectorConfig, need: Need): void {
  * clipped away, so the dramatic event the sector brief promises would be invisible. This is measured
  * against the real constructed field, not guessed from the authored numbers.
  */
+// eslint-disable-next-line complexity -- a pulse is validated against every physical boundary in one pass.
 function checkPulses(
   config: SectorConfig,
   sampledFields: Readonly<Record<FieldId, ScalarField>>,
   need: Need,
 ): void {
+  if (!Array.isArray(config.pulses)) {
+    need(false, `world ${config.id}: pulses must be an array`);
+    return;
+  }
   const ids = new Set<string>();
   for (const pulse of config.pulses) {
-    need(!ids.has(pulse.id), `sector ${config.id}: duplicate pulse id "${pulse.id}"`);
-    ids.add(pulse.id);
-    need(pulse.period >= 120, `sector ${config.id}: pulse period must be >= 120 ticks`);
+    if (!pulse || typeof pulse !== 'object') {
+      need(false, `world ${config.id}: pulse must be an object`);
+      continue;
+    }
+    need(typeof pulse.id === 'string' && pulse.id.length > 0,
+      `world ${config.id}: pulse id must not be empty`);
+    if (typeof pulse.id === 'string') {
+      need(!ids.has(pulse.id), `sector ${config.id}: duplicate pulse id "${pulse.id}"`);
+      ids.add(pulse.id);
+    }
+    need(Object.hasOwn(FIELD_LIMITS, pulse.field),
+      `world ${config.id}: pulse "${pulse.id}" has an unknown field`);
+    need(Number.isInteger(pulse.period) && pulse.period >= 120,
+      `sector ${config.id}: pulse period must be >= 120 ticks`);
+    need(Number.isInteger(pulse.phase), `sector ${config.id}: pulse phase must be an integer tick`);
+    need(Number.isFinite(pulse.radius) && pulse.radius > 0,
+      `sector ${config.id}: pulse radius must be positive`);
     need(
       Number.isFinite(pulse.amount) && pulse.amount !== 0,
       `sector ${config.id}: pulse amount must be non-zero`,
     );
     need(
-      pulse.x >= 0 && pulse.x < config.width && pulse.y >= 0 && pulse.y < config.height,
+      Number.isFinite(pulse.x) && Number.isFinite(pulse.y) && pulse.x >= 0 && pulse.x < config.width &&
+        pulse.y >= 0 && pulse.y < config.height,
       `sector ${config.id}: pulse "${pulse.id}" origin is outside the grid`,
     );
-
-    const limits = FIELD_LIMITS[pulse.field];
-    const current = sampledFields[pulse.field].getAt(pulse.x, pulse.y);
+    if (
+      !Object.hasOwn(FIELD_LIMITS, pulse.field) || !Number.isFinite(pulse.x) ||
+      !Number.isFinite(pulse.y) || !Number.isFinite(pulse.amount) || !Number.isFinite(pulse.radius)
+    ) continue;
+    const field = pulse.field as FieldId;
+    const limits = FIELD_LIMITS[field];
+    const current = sampledFields[field].getAt(pulse.x, pulse.y);
     const observable = Math.abs(clamp(current + pulse.amount, limits.min, limits.max) - current);
     need(
       observable >= Math.abs(pulse.amount) * 0.5,

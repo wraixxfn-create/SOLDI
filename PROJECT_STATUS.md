@@ -5,14 +5,15 @@
 
 ## Stato sintetico
 
-**Applicazione browser avviabile e giocabile end-to-end; milestone contratti/configurazione completata.**
+**Applicazione browser avviabile e giocabile end-to-end; modello ecologico, ciclo discreto, determinismo e DSL regole completati.**
 Il repository era già oltre la milestone iniziale di Canvas + loop + reset prima di questo intervento:
 non è stato sostituito con una demo incompleta. La schermata di survey usa il Canvas 2D e un loop
 controllato; il report permette di riavviare il settore e Settings consente di resettare il profilo.
 
-La milestone corrente aggiunge contratti tipizzati di dominio, validatori runtime per challenge e
-progressi importati, test di regressione, istruzioni di clonazione/avvio/debug e aggiornamento delle
-decisioni/rischi. Nessun nuovo servizio o dipendenza runtime è stato introdotto.
+La milestone corrente rende espliciti stock di acqua/nutrienti e limiti, aggiunge le quattro strategie
+starter, valida ogni World in costruzione e separa il turno in sette fasi. Le regole authored sono AST
+tipizzate senza codice eseguibile; gli stream RNG sono derivati per agente/turno e il rendering è testato
+come lettore. Sono mantenuti la campagna e i contratti/import validator preesistenti.
 
 ## Funzionalità completate e verificate
 
@@ -22,19 +23,23 @@ decisioni/rischi. Nessun nuovo servizio o dipendenza runtime è stato introdotto
 | Avvio locale | Completato | `npm run dev -- --host 0.0.0.0` avviato; porta 5173 pronta; richiesta HTTP alla shell ha restituito titolo, Canvas e entrypoint |
 | Build | Completato | `npm run verify`; Vite 8.3.4 ha prodotto build statica |
 | Typecheck e lint | Completato | `tsc --noEmit` e ESLint, zero errori e zero warning |
-| Suite automatica | Completato | **166 test passati in 11 file** con Vitest |
+| Suite automatica | Completato | **186 test passati in 14 file** con Vitest |
 | Audit Codex | Completato | `npm run laws`: tutte le proposizioni delle cinque missioni risultano non ambigue e verificabili |
+| Modello del mondo | Completato | `WorldConfig`/`SectorConfig`: territorio chiuso 16–128×12–128, clima, acqua 0–1, nutrienti 0–4/cella; `validateWorldConfig` e snapshot immutabile |
+| Modello delle specie | Completato | quattro strategie starter (`PHY-1`, `PRE-1`, `DEC-1`, `SYM-1`) e 12 specie campagna; bisogni, dieta, life history, mobilità e interazioni condividono il motore |
+| Ciclo e determinismo | Completato | sette fasi documentate, coorte ordinata per ID, nascite differite, RNG derivato per agente/turno; replay con azioni e rendering/headless identici nei test |
+| Motore regole | Completato | `src/core/sim/rules.ts`: prerequisiti AST, priorità, modalità stack/exclusive, once/each-turn, effetti enumerati; parser bounded rifiuta codice/operazioni sconosciute |
 | Contratti dominio | Completato | `src/domain/contracts.ts`: World, Species, Organism, Environment, Rule, Experiment, Objective, SimulationState, Challenge, PlayerProgress |
 | Validazione import | Completato | `src/domain/validation.ts`: challenge da `unknown` validata prima della simulazione; regole Codex rigenerate; progressi passati dallo schema save |
 | Regole di dipendenza | Documentate | `docs/ARCHITECTURE.md` e `docs/TECHNICAL_SPEC.md`; il core non dipende da UI/DOM/SDK |
-| Stato decisioni/rischi | Documentato | `docs/DECISIONS.md` (ADR-012), questo file e `KNOWN_ISSUES.md` |
+| Stato decisioni/rischi | Documentato | `docs/DECISIONS.md` (ADR-012/013), questo file e `KNOWN_ISSUES.md` |
 
 Comandi eseguiti con esito positivo in questa milestone:
 
 ```text
 npm ci
-npm run verify       # 166/166 test, lint/typecheck puliti, build riuscita
-npm run laws         # equità passata per tutti i settori
+npm run verify       # 186/186 test in 14 file, lint/typecheck puliti, build riuscita
+npm run laws         # zero proposizioni dichiarate unfair nei cinque settori
 npm run dev -- --host 0.0.0.0  # Vite pronto su 5173
 curl http://127.0.0.1:5173/   # shell HTML servita con successo
 ```
@@ -47,8 +52,9 @@ curl http://127.0.0.1:5173/   # shell HTML servita con successo
   su un browser grafico reale in questa esecuzione.
 - I test di bilanciamento registrati nel registro coprono tre seed per settore; una ricerca più ampia
   resta consigliata.
-- I contratti sono verificati con test strutturali e validazione import; non sostituiscono i modelli
-  interni già in uso e vanno aggiornati insieme a `SectorConfig`/`SaveData`.
+- Il mondo starter con quattro strategie è un template/headless core testato; la schermata della campagna
+  continua a usare i cinque settori authored. Nuove modifiche a `SectorConfig`, risorse o regole devono
+  aggiornare insieme parser, validazione runtime e test malformed.
 
 ## Prossimi passi
 

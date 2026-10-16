@@ -307,7 +307,7 @@ rango diverso da F (il codice in `app.ts`). Le nuove meccaniche arrivano una all
 ## 13. Ambito del prodotto
 
 ### 13.1 MVP (prima build pubblicabile)
-L'MVP è la build attuale (già giocabile, con 166 test verdi verificati il 2026-10-16) più un numero ristretto di correzioni.
+L'MVP è la build attuale, giocabile end-to-end (186 test verdi verificati il 2026-10-16), più un numero ristretto di correzioni.
 
 **Già presente nel codice:**
 - Simulazione deterministica con 12 specie e 5 settori.

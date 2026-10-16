@@ -22,6 +22,8 @@ describe('domain contracts and runtime boundary validation', () => {
     const challenge: Challenge = result.value;
     expect(challenge.id).toBe(firstSector.id);
     expect(challenge.environment.width).toBe(firstSector.width);
+    expect(challenge.environment.resources).toEqual(firstSector.resources);
+    expect(challenge.environment.rules).toEqual(firstSector.rules);
     expect(challenge.rules.length).toBeGreaterThan(0);
     expect(challenge.objective.mustKeepOneSpeciesAlive).toBe(true);
   });
@@ -38,6 +40,20 @@ describe('domain contracts and runtime boundary validation', () => {
     const invalidSector = cloneSector();
     invalidSector.width = 3;
     expect(validateChallengeData(invalidSector)).toMatchObject({ ok: false });
+
+    const unsafeRules = cloneSector();
+    unsafeRules.rules = [{
+      id: 'unsafe',
+      priority: 1,
+      mode: 'stack',
+      group: null,
+      frequency: 'each-turn',
+      prerequisites: { type: 'script', source: 'throw new Error()' },
+      effects: [{ type: 'run-code', source: 'arbitrary level code' }],
+    }];
+    const unsafeResult = validateChallengeData(unsafeRules);
+    expect(unsafeResult.ok).toBe(false);
+    if (!unsafeResult.ok) expect(unsafeResult.issues.join(' ')).toMatch(/not supported/);
   });
 
   it('validates progress through the save schema and rejects unsupported versions', () => {

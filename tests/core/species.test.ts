@@ -28,6 +28,10 @@ function traitsWith(overrides: Partial<SpeciesTraits> = {}): SpeciesTraits {
     moveCost: 0.004,
     role: 'photoautotroph',
     dietKind: 'none',
+    strategy: 'photosynthetic',
+    resourceNeeds: { waterPerEnergy: 0, nutrientsPerEnergy: 0 },
+    decompositionYield: 0,
+    symbiosis: null,
     diet: [],
     tolerance: {
       temperature: { ideal: 300, width: 40, fragile: 0.25 },
