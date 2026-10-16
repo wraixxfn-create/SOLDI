@@ -47,10 +47,11 @@ function reportHabitability(
   sector: (typeof SECTORS)[number],
   world: World,
 ): void {
-  const traits = sector.roster.map((id) => SPECIES_BY_ID.get(id)!.traits);
   const rows: string[] = [];
-  for (let i = 0; i < sector.roster.length; i++) {
-    const t = traits[i]!;
+  for (const [i, id] of sector.roster.entries()) {
+    const traits = SPECIES_BY_ID.get(id)?.traits;
+    if (!traits) throw new ContentError(`sector ${sector.id} rosters unknown species ${id}`);
+    const t = traits;
     let liveable = 0;
     let good = 0;
     let sum = 0;
@@ -64,7 +65,7 @@ function reportHabitability(
     }
     const cells = sector.width * sector.height;
     rows.push(
-      `${sector.roster[i]!} liveable=${((liveable / cells) * 100).toFixed(0)}% good=${((good / cells) * 100).toFixed(0)}% meanFit=${(sum / cells).toFixed(2)}`,
+      `${id} liveable=${((liveable / cells) * 100).toFixed(0)}% good=${((good / cells) * 100).toFixed(0)}% meanFit=${(sum / cells).toFixed(2)} (rank ${i + 1})`,
     );
   }
   console.log('  habitability: ' + rows.join(' | '));

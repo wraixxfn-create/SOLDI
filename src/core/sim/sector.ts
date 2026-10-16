@@ -1,7 +1,7 @@
 import { ScalarField, FIELD_IDS, type FieldId, type FieldStats } from '../field.ts';
 import { clamp } from '../math.ts';
 import { ContentError } from '../errors.ts';
-import type { FieldDistribution, SpeciesDefinition, SpeciesId } from './species.ts';
+import { fitnessAt, type FieldDistribution, type SpeciesDefinition, type SpeciesId } from './species.ts';
 
 /**
  * Sector configuration: the complete, authored description of one mission world.
@@ -157,6 +157,33 @@ export function buildFields(config: SectorConfig): Readonly<Record<FieldId, Scal
   return fields;
 }
 
+/** Default per-tick field dynamics; the World and the climate sampler must share these numbers. */
+export const DEFAULT_DIFFUSION = 0.06;
+export const DEFAULT_RELAXATION = 0.0035;
+
+/**
+ * Applies the environmental pulses scheduled for `tick`.
+ *
+ * Lives here rather than inside the World because the *climate* the deduction layer measures must
+ * include the dramatic events the player experiences; a law derived from a pulse-free climate would
+ * describe a world nobody plays in.
+ */
+export function applyScheduledPulses(
+  fields: Readonly<Record<FieldId, ScalarField>>,
+  config: SectorConfig,
+  tick: number,
+): readonly EnvironmentalPulse[] {
+  const fired: EnvironmentalPulse[] = [];
+  for (const pulse of config.pulses) {
+    if (pulse.period <= 0) continue;
+    // Floored modulo: robust for ticks before the first phase as well as after it.
+    if ((((tick - pulse.phase) % pulse.period) + pulse.period) % pulse.period !== 0) continue;
+    fields[pulse.field].addRadial(pulse.x, pulse.y, pulse.radius, pulse.amount);
+    fired.push(pulse);
+  }
+  return fired;
+}
+
 /** Applies one tick of environmental dynamics: source persistence, diffusion, relaxation. */
 export function advanceFields(
   fields: Readonly<Record<FieldId, ScalarField>>,
@@ -192,54 +219,75 @@ export function computeFieldDistributions(
   const cached = distributionCache.get(config.id);
   if (cached) return cached;
 
+  const sampleEvery = 6;
+  const horizon = config.pulses.length
+    ? Math.min(900, Math.max(...config.pulses.map((p) => p.period)) + 120)
+    : 240;
+
+  // Pass 1 — walk the climate once to learn the range each field actually spans (pulses included).
+  // Pass 2 — bin *that* range, so `weights[i]` and `binValue(distribution, i)` describe the same
+  // interval. They used to disagree: samples were binned on the physical limits (150–450 K) while
+  // `binValue` reconstructed them on the observed range, so `factorLoss` integrated a 265 K weight
+  // against, say, 306 K of fitness — which silently corrupted every reproduction-driver law.
+  const ranges: Record<FieldId, { min: number; max: number }> = {
+    temperature: { min: Infinity, max: -Infinity },
+    humidity: { min: Infinity, max: -Infinity },
+    light: { min: Infinity, max: -Infinity },
+  };
+  const probe = buildFields(config);
+  const observe = (fields: Readonly<Record<FieldId, ScalarField>>): void => {
+    for (const id of FIELD_IDS) {
+      const stats = fields[id].stats();
+      if (stats.min < ranges[id].min) ranges[id].min = stats.min;
+      if (stats.max > ranges[id].max) ranges[id].max = stats.max;
+    }
+  };
+  observe(probe);
+  for (let t = 1; t <= horizon; t++) {
+    applyScheduledPulses(probe, config, t);
+    advanceFields(probe, config, DEFAULT_DIFFUSION, DEFAULT_RELAXATION);
+    if (t % sampleEvery === 0) observe(probe);
+  }
+  for (const id of FIELD_IDS) {
+    const range = ranges[id];
+    if (!Number.isFinite(range.min) || !Number.isFinite(range.max)) {
+      const baseline = config.baseline[id];
+      range.min = baseline;
+      range.max = baseline;
+    }
+    if (range.max <= range.min) range.max = range.min + 1e-6;
+  }
+
+  // Pass 2 — count samples per bin of the observed range.
   const fields = buildFields(config);
   const accumulators: Record<FieldId, Float64Array> = {
     temperature: new Float64Array(bins),
     humidity: new Float64Array(bins),
     light: new Float64Array(bins),
   };
-  const mins: Record<FieldId, number> = { temperature: Infinity, humidity: Infinity, light: Infinity };
-  const maxs: Record<FieldId, number> = {
-    temperature: -Infinity,
-    humidity: -Infinity,
-    light: -Infinity,
-  };
-
-  const sampleEvery = 6;
-  const horizon = config.pulses.length
-    ? Math.min(900, Math.max(...config.pulses.map((p) => p.period)) + 120)
-    : 240;
-
   const accumulate = (): void => {
     for (const id of FIELD_IDS) {
-      const limits = FIELD_LIMITS[id];
-      const span = limits.max - limits.min;
+      const range = ranges[id];
+      const span = range.max - range.min;
       const data = fields[id].data;
       const counts = accumulators[id];
-      let low = mins[id];
-      let high = maxs[id];
       for (let i = 0; i < data.length; i++) {
-        const value = data[i] as number;
-        if (value < low) low = value;
-        if (value > high) high = value;
-        const bin = clamp(Math.floor(((value - limits.min) / span) * (bins - 1)), 0, bins - 1);
+        const bin = clamp(Math.floor((((data[i] as number) - range.min) / span) * (bins - 1)), 0, bins - 1);
         counts[bin] = (counts[bin] as number) + 1;
       }
-      mins[id] = low;
-      maxs[id] = high;
     }
   };
-
   accumulate();
-  for (let t = 0; t < horizon; t++) {
-    advanceFields(fields, config, 0.06, 0.0035);
+  for (let t = 1; t <= horizon; t++) {
+    applyScheduledPulses(fields, config, t);
+    advanceFields(fields, config, DEFAULT_DIFFUSION, DEFAULT_RELAXATION);
     if (t % sampleEvery === 0) accumulate();
   }
 
   const result: Record<FieldId, FieldDistribution> = {
-    temperature: buildDistribution('temperature', bins, mins, maxs, accumulators.temperature),
-    humidity: buildDistribution('humidity', bins, mins, maxs, accumulators.humidity),
-    light: buildDistribution('light', bins, mins, maxs, accumulators.light),
+    temperature: buildDistribution('temperature', bins, ranges.temperature.min, ranges.temperature.max, accumulators.temperature),
+    humidity: buildDistribution('humidity', bins, ranges.humidity.min, ranges.humidity.max, accumulators.humidity),
+    light: buildDistribution('light', bins, ranges.light.min, ranges.light.max, accumulators.light),
   };
   distributionCache.set(config.id, result);
   return result;
@@ -248,16 +296,14 @@ export function computeFieldDistributions(
 function buildDistribution(
   field: FieldId,
   bins: number,
-  mins: Record<FieldId, number>,
-  maxs: Record<FieldId, number>,
+  min: number,
+  max: number,
   counts: Float64Array,
 ): FieldDistribution {
   let total = 0;
   for (let i = 0; i < bins; i++) total += counts[i] as number;
   const weights = new Float64Array(bins);
   let mean = 0;
-  const min = mins[field];
-  const max = maxs[field];
   const step = (max - min) / Math.max(1, bins - 1);
   for (let i = 0; i < bins; i++) {
     const weight = total > 0 ? (counts[i] as number) / total : 1 / bins;
@@ -290,7 +336,6 @@ export function validateSector(
   config: SectorConfig,
   speciesById: ReadonlyMap<SpeciesId, SpeciesDefinition>,
 ): string[] {
-  const knownSpecies = new Set(speciesById.keys());
   const problems: string[] = [];
   const need = (condition: boolean, message: string): void => {
     if (!condition) problems.push(message);
@@ -325,9 +370,47 @@ export function validateSector(
     );
   }
 
+  const roster = checkRoster(config, speciesById, need);
+  checkSources(config, need);
+  // Every rule below measures the *really constructed* fields, not the authored numbers.
+  const sampledFields = buildFields(config);
+  checkPulses(config, sampledFields, need);
+  checkHabitability(config, speciesById, sampledFields, need);
+
+  // A survey must start with enough organisms to observe: at least 1.5 % of the grid populated.
+  const total = Object.values(config.initialPopulations).reduce((a, b) => a + b, 0);
+  need(
+    total >= Math.round(config.width * config.height * 0.015),
+    `sector ${config.id}: initial population (${total}) is too sparse for a survey`,
+  );
+
+  // Every consumer on the roster must have at least one of its diet species present, otherwise its
+  // trophic law would be unobservable. Autotrophs are exempt.
+  for (const species of config.roster) {
+    const def = speciesById.get(species);
+    if (!def || def.traits.dietKind === 'none') continue;
+    const available = def.traits.diet.filter((prey) => roster.has(prey));
+    need(
+      available.length > 0,
+      `sector ${config.id}: consumer "${species}" has none of its diet species on the roster`,
+    );
+  }
+
+  return problems;
+}
+
+type Need = (condition: boolean, message: string) => void;
+
+/** Roster, population and cap tables. Returns the validated roster for later checks. */
+function checkRoster(
+  config: SectorConfig,
+  speciesById: ReadonlyMap<SpeciesId, SpeciesDefinition>,
+  need: Need,
+): Set<SpeciesId> {
+  const known = new Set(speciesById.keys());
   const seen = new Set<SpeciesId>();
   for (const species of config.roster) {
-    need(knownSpecies.has(species), `sector ${config.id}: unknown species "${species}"`);
+    need(known.has(species), `sector ${config.id}: unknown species "${species}"`);
     need(!seen.has(species), `sector ${config.id}: species "${species}" listed twice`);
     seen.add(species);
     const pop = config.initialPopulations[species];
@@ -342,19 +425,20 @@ export function validateSector(
     );
   }
   for (const key of Object.keys(config.initialPopulations)) {
-    need(
-      seen.has(key),
-      `sector ${config.id}: initialPopulations mentions "${key}" which is not on the roster`,
-    );
+    need(seen.has(key), `sector ${config.id}: initialPopulations mentions "${key}" which is not on the roster`);
   }
   for (const key of Object.keys(config.populationCaps)) {
     need(seen.has(key), `sector ${config.id}: populationCaps mentions "${key}" which is not on the roster`);
   }
+  return seen;
+}
 
-  const sourceIds = new Set<string>();
+/** Terrain sources: unique ids, inside the grid, with a real radius, strength and persistence. */
+function checkSources(config: SectorConfig, need: Need): void {
+  const ids = new Set<string>();
   for (const source of config.sources) {
-    need(!sourceIds.has(source.id), `sector ${config.id}: duplicate terrain source id "${source.id}"`);
-    sourceIds.add(source.id);
+    need(!ids.has(source.id), `sector ${config.id}: duplicate terrain source id "${source.id}"`);
+    ids.add(source.id);
     need(
       source.x >= 0 && source.x < config.width && source.y >= 0 && source.y < config.height,
       `sector ${config.id}: terrain source "${source.id}" is outside the grid`,
@@ -369,50 +453,92 @@ export function validateSector(
       `sector ${config.id}: terrain source "${source.id}" persistence must be in (0, 0.5]`,
     );
   }
+}
 
-  const pulseIds = new Set<string>();
+/**
+ * Pulses: unique ids, sane periods and origins — and a measurable effect.
+ *
+ * A pulse whose epicentre already sits at (or beyond) the physical limit of its field has its impulse
+ * clipped away, so the dramatic event the sector brief promises would be invisible. This is measured
+ * against the real constructed field, not guessed from the authored numbers.
+ */
+function checkPulses(
+  config: SectorConfig,
+  sampledFields: Readonly<Record<FieldId, ScalarField>>,
+  need: Need,
+): void {
+  const ids = new Set<string>();
   for (const pulse of config.pulses) {
-    need(!pulseIds.has(pulse.id), `sector ${config.id}: duplicate pulse id "${pulse.id}"`);
-    pulseIds.add(pulse.id);
+    need(!ids.has(pulse.id), `sector ${config.id}: duplicate pulse id "${pulse.id}"`);
+    ids.add(pulse.id);
     need(pulse.period >= 120, `sector ${config.id}: pulse period must be >= 120 ticks`);
-    need(Number.isFinite(pulse.amount) && pulse.amount !== 0, `sector ${config.id}: pulse amount must be non-zero`);
+    need(
+      Number.isFinite(pulse.amount) && pulse.amount !== 0,
+      `sector ${config.id}: pulse amount must be non-zero`,
+    );
     need(
       pulse.x >= 0 && pulse.x < config.width && pulse.y >= 0 && pulse.y < config.height,
       `sector ${config.id}: pulse "${pulse.id}" origin is outside the grid`,
     );
-  }
 
-  // A survey must start with enough organisms to observe: at least 1.5 % of the grid populated.
-  const total = Object.values(config.initialPopulations).reduce((a, b) => a + b, 0);
-  need(
-    total >= Math.round(config.width * config.height * 0.015),
-    `sector ${config.id}: initial population (${total}) is too sparse for a survey`,
-  );
-
-  // Every consumer on the roster must have at least one of its diet species present, otherwise its
-  // trophic law would be unobservable. Autotrophs are exempt.
-  for (const species of config.roster) {
-    const def = speciesById.get(species);
-    if (!def || def.traits.dietKind === 'none') continue;
-    const available = def.traits.diet.filter((prey) => seen.has(prey));
+    const limits = FIELD_LIMITS[pulse.field];
+    const current = sampledFields[pulse.field].getAt(pulse.x, pulse.y);
+    const observable = Math.abs(clamp(current + pulse.amount, limits.min, limits.max) - current);
     need(
-      available.length > 0,
-      `sector ${config.id}: consumer "${species}" has none of its diet species on the roster`,
+      observable >= Math.abs(pulse.amount) * 0.5,
+      `sector ${config.id}: pulse "${pulse.id}" is clipped at the ${pulse.field} limit — it would move the field by only ${observable.toFixed(3)} of ${Math.abs(pulse.amount)}`,
     );
   }
-
-  return problems;
 }
 
-/** Throws a `ContentError` listing every problem; used by content modules and tests. */
+/**
+ * Every species on the roster must have somewhere to live: at least one cell where the real fitness
+ * law is positive. Without this the world silently starts a doomed population on its "fittest cell"
+ * fallback and the player watches an extinction they could never have prevented.
+ */
+function checkHabitability(
+  config: SectorConfig,
+  speciesById: ReadonlyMap<SpeciesId, SpeciesDefinition>,
+  sampledFields: Readonly<Record<FieldId, ScalarField>>,
+  need: Need,
+): void {
+  for (const species of config.roster) {
+    const definition = speciesById.get(species);
+    if (!definition) continue; // already reported as an unknown species
+    let habitable = 0;
+    for (let y = 0; y < config.height && habitable === 0; y++) {
+      for (let x = 0; x < config.width; x++) {
+        const fit = fitnessAt(definition.traits, {
+          temperature: sampledFields.temperature.sampleBilinear(x + 0.5, y + 0.5),
+          humidity: sampledFields.humidity.sampleBilinear(x + 0.5, y + 0.5),
+          light: sampledFields.light.sampleBilinear(x + 0.5, y + 0.5),
+        });
+        if (fit > 0) {
+          habitable = 1;
+          break;
+        }
+      }
+    }
+    need(
+      habitable > 0,
+      `sector ${config.id}: species "${species}" has no habitable cell (its tolerances do not overlap this sector's climate)`,
+    );
+  }
+}
+
+/**
+ * Throws a `ContentError` listing **every** problem: the message carries the first few and the full
+ * list travels in `context.problems`, so a stack trace stays actionable without a debugger.
+ */
 export function assertValidSector(
   config: SectorConfig,
   speciesById: ReadonlyMap<SpeciesId, SpeciesDefinition>,
 ): void {
   const problems = validateSector(config, speciesById);
-  if (problems.length > 0) {
-    throw new ContentError(`Invalid sector "${config.id}"`, { problems });
-  }
+  if (problems.length === 0) return;
+  const summary = problems.slice(0, 4).join('; ');
+  const more = problems.length > 4 ? ` (+${problems.length - 4} more)` : '';
+  throw new ContentError(`Invalid sector "${config.id}": ${summary}${more}`, { problems });
 }
 
 export function requireSectorById(sectors: readonly SectorConfig[], id: string): SectorConfig {

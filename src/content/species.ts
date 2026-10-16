@@ -330,7 +330,9 @@ export const MYCORRHIZA = define({
   tolerance: {
     temperature: { ideal: 298, width: 72, fragile: 0.3 },
     humidity: { ideal: 0.68, width: 0.42, fragile: 0.26 },
-    light: { ideal: 0.22, width: 0.42, fragile: 0.28 },
+    // 0.18, not 0.22: the species' optimum must sit clearly inside the aphotic band (< 0.25),
+    // otherwise the Codex answer hinges on a 30 mK difference at the boundary.
+    light: { ideal: 0.18, width: 0.42, fragile: 0.28 },
   },
 });
 

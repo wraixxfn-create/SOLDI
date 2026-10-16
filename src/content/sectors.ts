@@ -120,8 +120,12 @@ export const SECTOR_VAULT_BASIN: SectorConfig = {
       period: 620,
       amount: 0.32,
       radius: 10,
-      x: Math.round(0.1 * (VAULT_WIDTH - 1)),
-      y: Math.round(0.82 * (VAULT_HEIGHT - 1)),
+      // 13,28 — just outside the permanent roof-fracture opening. It used to be placed *on* the
+      // opening (light 0.96 of a 1.00 ceiling), so the +0.32 flare was clipped away and the event
+      // the sector brief advertises never did anything. On the dark floor the burst is fully
+      // visible: the corridor briefly enters the dim/bright band and the canopy growers respond.
+      x: 13,
+      y: 28,
       phase: 300,
       label: 'vent flare through the roof fracture',
     },

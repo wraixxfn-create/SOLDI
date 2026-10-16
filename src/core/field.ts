@@ -28,6 +28,7 @@ export const FIELD_SPECS: Readonly<Record<FieldId, FieldSpec>> = Object.freeze({
   light: { id: 'light', label: 'Irradiance', unit: 'lux', min: 0, max: 1, decimals: 2 },
 });
 
+/** Read-only by contract: `ScalarField.stats()` returns a frozen shared instance. */
 export interface FieldStats {
   readonly min: number;
   readonly max: number;
@@ -52,7 +53,10 @@ export class ScalarField {
 
   private readonly scratch: Float32Array;
   private dirtyStats = true;
-  private cachedStats: FieldStats = { min: 0, max: 0, mean: 0 };
+  // Frozen on purpose: `stats()` hands this exact object to callers on every call (no per-frame
+  // allocation), so it must not be mutable — a caller writing to it used to poison the cache for
+  // every later reader (found by tests/core/field.test.ts).
+  private cachedStats: FieldStats = Object.freeze({ min: 0, max: 0, mean: 0 });
 
   constructor(width: number, height: number, initial = 0) {
     if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
@@ -234,30 +238,46 @@ export class ScalarField {
     this.dirtyStats = true;
   }
 
+  /** Min/max/mean of the whole field. The returned object is frozen and shared: read, do not keep. */
   stats(): FieldStats {
     if (this.dirtyStats) {
-      this.cachedStats = computeStats(this.data);
+      this.cachedStats = Object.freeze(computeStats(this.data));
       this.dirtyStats = false;
     }
     return this.cachedStats;
   }
 
-  /** Writes the field into an RGBA buffer using a caller-supplied colour ramp. */
+  /**
+   * Writes the field into an RGBA buffer using a caller-supplied colour ramp.
+   *
+   * `pixels` must hold exactly `width * scaleX * height * scaleY` pixels. Repaired 2026-10-16: the
+   * row loop was bounded by `Math.min(h * scaleY, h * scaleY)` — a no-op that happened to be correct
+   * only for positive integer scales and silently mis-strided the output buffer.
+   */
   paint(
     pixels: Uint8ClampedArray,
     scaleX: number,
     scaleY: number,
     ramp: (value: number) => readonly [number, number, number],
   ): void {
-    const w = this.width;
-    const h = this.height;
-    for (let y = 0; y < Math.min(h * scaleY, h * scaleY); y++) {
-      const sy = Math.min(h - 1, Math.floor(y / scaleY));
-      for (let x = 0; x < w * scaleX; x++) {
-        const sx = Math.min(w - 1, Math.floor(x / scaleX));
-        const value = this.data[sy * w + sx] as number;
-        const [r, g, b] = ramp(value);
-        const idx = (y * w * scaleX + x) * 4;
+    if (!Number.isInteger(scaleX) || !Number.isInteger(scaleY) || scaleX < 1 || scaleY < 1) {
+      throw new RangeError(`paint() requires positive integer scales, got ${scaleX}x${scaleY}`);
+    }
+    const outWidth = this.width * scaleX;
+    const outHeight = this.height * scaleY;
+    const required = outWidth * outHeight * 4;
+    if (pixels.length < required) {
+      throw new RangeError(
+        `paint() needs a ${outWidth}x${outHeight} RGBA buffer (${required} bytes), got ${pixels.length}`,
+      );
+    }
+    for (let y = 0; y < outHeight; y++) {
+      const sy = Math.min(this.height - 1, Math.floor(y / scaleY));
+      const row = sy * this.width;
+      for (let x = 0; x < outWidth; x++) {
+        const sx = Math.min(this.width - 1, Math.floor(x / scaleX));
+        const [r, g, b] = ramp(this.data[row + sx] as number);
+        const idx = (y * outWidth + x) * 4;
         pixels[idx] = r;
         pixels[idx + 1] = g;
         pixels[idx + 2] = b;

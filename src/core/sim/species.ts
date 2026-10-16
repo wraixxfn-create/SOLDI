@@ -43,6 +43,13 @@ export const STRESS_RESPONSE_LABELS: Readonly<Record<StressResponse, string>> = 
   perish: 'die in place, without dispersing',
 });
 
+/** Third-person forms for prompts and reports ("what does it do when stressed? -> it flees"). */
+export const STRESS_RESPONSE_ACTIONS: Readonly<Record<StressResponse, string>> = Object.freeze({
+  migrate: 'Moves away toward tolerable terrain',
+  dormant: 'Stops reproducing and endures where it is',
+  perish: 'Stays put and dies, without dispersing',
+});
+
 /** Behaviour multipliers derived from `stressResponse`; one place, so tests can assert the law. */
 export const STRESS_BEHAVIOUR: Readonly<
   Record<StressResponse, { taxis: number; exposureScale: number; reproGate: number }>

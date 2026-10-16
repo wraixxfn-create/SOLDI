@@ -1,7 +1,7 @@
 import { ScalarField, FIELD_IDS, type FieldId, type FieldStats } from '../field.ts';
 import { Rng } from '../rng.ts';
 import { clamp, clamp01, safeDiv, finite } from '../math.ts';
-import { invariant } from '../errors.ts';
+import { InvariantError, invariant } from '../errors.ts';
 import {
   STRESS_BEHAVIOUR,
   fitnessAt,
@@ -29,7 +29,14 @@ import {
   type PopulationSample,
   type ProbeState,
 } from './metrics.ts';
-import { advanceFields, buildFields, type SectorConfig } from './sector.ts';
+import {
+  DEFAULT_DIFFUSION,
+  DEFAULT_RELAXATION,
+  advanceFields,
+  applyScheduledPulses,
+  buildFields,
+  type SectorConfig,
+} from './sector.ts';
 
 /**
  * The ecosystem simulation.
@@ -114,8 +121,7 @@ export const EXPOSURE_LETHAL_TICK_LIMIT = 110;
 export const MOVE_DECISION_INTERVAL = 3;
 export const HASH_CELL_SIZE = 4;
 
-const DEFAULT_DIFFUSION = 0.06;
-const DEFAULT_RELAXATION = 0.0035;
+
 const BIOMASS_DECAY = 0.0022;
 const BIOMASS_SPREAD = 0.1;
 /**
@@ -310,10 +316,9 @@ export class World {
     return fitnessAt(traits, readings);
   }
 
+  /** Fitness of a species at a point. Throws on an unknown id — a typo must not read as "dead zone". */
   fitnessAt(x: number, y: number, species: SpeciesId): number {
-    const traits = this.traits.get(species);
-    if (!traits) return 0;
-    return this.fitnessAtPosition(traits, x, y);
+    return this.fitnessAtPosition(this.getSpecies(species), x, y);
   }
 
   count(species: SpeciesId): number {
@@ -348,6 +353,26 @@ export class World {
   }
 
   /** Total standing biomass inside a circular area (probe readouts, area surveys). */
+  /** Standing biomass of one species inside a radius (the honest read-out for its instruments). */
+  speciesBiomassInRadius(species: SpeciesId, x: number, y: number, radius: number): number {
+    const field = this.biomassFields.get(species);
+    if (!field) return 0;
+    const r2 = radius * radius;
+    let total = 0;
+    const x0 = clamp(Math.floor(x - radius), 0, field.width - 1);
+    const x1 = clamp(Math.ceil(x + radius), 0, field.width - 1);
+    const y0 = clamp(Math.floor(y - radius), 0, field.height - 1);
+    const y1 = clamp(Math.ceil(y + radius), 0, field.height - 1);
+    for (let cy = y0; cy <= y1; cy++) {
+      for (let cx = x0; cx <= x1; cx++) {
+        const dx = cx + 0.5 - x;
+        const dy = cy + 0.5 - y;
+        if (dx * dx + dy * dy <= r2) total += field.getAt(cx, cy);
+      }
+    }
+    return total;
+  }
+
   biomassInRadius(x: number, y: number, radius: number): number {
     const r2 = radius * radius;
     let total = 0;
@@ -439,10 +464,10 @@ export class World {
   }
 
   private applyPulses(): void {
-    for (const pulse of this.config.pulses) {
-      if (pulse.period <= 0) continue;
-      if ((this.tick - pulse.phase) % pulse.period !== 0) continue;
-      this.fields[pulse.field].addRadial(pulse.x, pulse.y, pulse.radius, pulse.amount);
+    // The field effect comes from the shared scheduler (the same one the climate sampler uses, so a
+    // law can never be derived from a pulse-free world); only the player-visible event is local.
+    const fired = applyScheduledPulses(this.fields, this.config, this.tick);
+    for (const pulse of fired) {
       this.emit({
         tick: this.tick,
         kind: 'pulse',
@@ -549,14 +574,13 @@ export class World {
     const density = this.bucketDensity(agent.x, agent.y);
 
     // --- feeding ---
-    let gained = 0;
-    if (traits.dietKind === 'none') {
-      gained = this.photosynthesise(agent, traits, fit, density);
-    } else if (traits.dietKind === 'biomass') {
-      gained = this.graze(agent, traits, fit, false);
-    } else {
-      gained = this.hunt(agent, traits, fit);
-    }
+    // Every branch assigns, so the initialiser would only ever be dead code.
+    const gained =
+      traits.dietKind === 'none'
+        ? this.photosynthesise(agent, traits, fit, density)
+        : traits.dietKind === 'biomass'
+          ? this.graze(agent, traits, fit, false)
+          : this.hunt(agent, traits, fit);
     agent.energy = finite(agent.energy + gained);
 
     // --- movement ---
@@ -634,39 +658,9 @@ export class World {
     const room = Math.max(0, traits.maxEnergy - agent.energy);
     if (room <= 0) return 0;
     const radius = this.harvestRadius(traits);
-    const baseEfficiency = browseFallback ? 0.7 : 1;
-
-    // Candidates:
-    //  - the species this animal actually eats (the mat it grazes);
-    //  - *producers* it does not eat, for filter feeders (drifting detritus) and for any animal
-    //    forced onto the fallback browse path (scavenging). Only producers lay down a standing mat,
-    //    so scavenging must target them: an earlier version browsed the empty biomass fields of
-    //    consumer species, which gave a predator whose strike missed literally nothing to eat while
-    //    it stood on a lush mat (measured with `npm run trace -- ORP-2 GLI-3`).
-    let bestSpecies: SpeciesId | null = null;
-    let bestEfficiency = 0;
-    let bestAvailable = 0;
-    for (const id of this.config.roster) {
-      const candidateTraits = this.traits.get(id);
-      if (!candidateTraits) continue;
-      const isDiet = traits.diet.includes(id);
-      const roleScavenge = SCAVENGE_BY_ROLE[traits.role];
-      const canScavenge =
-        candidateTraits.dietKind === 'none' &&
-        roleScavenge > 0 &&
-        (traits.role === 'filter' || browseFallback);
-      if (!isDiet && !canScavenge) continue;
-      const field = this.biomassFields.get(id);
-      if (!field) continue;
-      const efficiency = isDiet ? baseEfficiency : baseEfficiency * roleScavenge;
-      const available = this.patchBiomass(field, agent.x, agent.y, radius) * efficiency;
-      if (available > bestAvailable) {
-        bestAvailable = available;
-        bestSpecies = id;
-        bestEfficiency = efficiency;
-      }
-    }
-    if (!bestSpecies || bestAvailable <= 0) return 0;
+    const patch = this.selectPatch(agent, traits, radius, browseFallback);
+    if (!patch) return 0;
+    const { species: bestSpecies, efficiency: bestEfficiency, available: bestAvailable } = patch;
     const field = this.biomassFields.get(bestSpecies);
     if (!field) return 0;
     const demand = traits.intakeRate * bestEfficiency * (0.4 + 0.6 * fit);
@@ -682,6 +676,44 @@ export class World {
     }
     this.recordIntake(agent.species, bestSpecies, taken);
     return taken * ASSIMILATION;
+  }
+
+  /**
+   * Picks the richest reachable food patch for a grazer and returns it with its efficiency.
+   *
+   * Candidates are, in order of preference:
+   *  - the species this animal actually eats (the mat it grazes);
+   *  - *producers* it does not eat, for filter feeders (drifting detritus) and for any animal forced
+   *    onto the fallback browse path (scavenging). Only producers lay down a standing mat, so
+   *    scavenging must target them: an earlier version browsed the empty biomass fields of consumer
+   *    species, which gave a predator whose strike missed literally nothing to eat while it stood on
+   *    a lush mat (measured with `npm run trace -- ORP-2 GLI-3`).
+   */
+  private selectPatch(
+    agent: Agent,
+    traits: SpeciesTraits,
+    radius: number,
+    browseFallback: boolean,
+  ): { species: SpeciesId; efficiency: number; available: number } | null {
+    const baseEfficiency = browseFallback ? 0.7 : 1;
+    const roleScavenge = SCAVENGE_BY_ROLE[traits.role];
+    let best: { species: SpeciesId; efficiency: number; available: number } | null = null;
+    for (const id of this.config.roster) {
+      const candidateTraits = this.traits.get(id);
+      if (!candidateTraits) continue;
+      const isDiet = traits.diet.includes(id);
+      const canScavenge =
+        candidateTraits.dietKind === 'none' &&
+        roleScavenge > 0 &&
+        (traits.role === 'filter' || browseFallback);
+      if (!isDiet && !canScavenge) continue;
+      const field = this.biomassFields.get(id);
+      if (!field) continue;
+      const efficiency = isDiet ? baseEfficiency : baseEfficiency * roleScavenge;
+      const available = this.patchBiomass(field, agent.x, agent.y, radius) * efficiency;
+      if (available > (best?.available ?? 0)) best = { species: id, efficiency, available };
+    }
+    return best;
   }
 
   /** Radius of the grazing patch: bigger for animals with a wider sensory range. */
@@ -1156,20 +1188,25 @@ export class World {
   }
 
   /** Injects assimilable biomass for a producer species (nutrient bloom instrument). */
-  nutrientBloom(
-    species: SpeciesId,
-    x: number,
-    y: number,
-    radius: number,
-    amount: number,
-  ): number {
+  nutrientBloom(species: SpeciesId, x: number, y: number, radius: number, amount: number): number {
+    this.getSpecies(species); // throws on an unknown id rather than silently doing nothing
+    if (!(amount > 0) || !Number.isFinite(amount) || !(radius > 0)) {
+      throw new InvariantError(
+        `nutrientBloom needs a positive amount and radius (got amount=${amount}, radius=${radius})`,
+        { species, amount, radius },
+      );
+    }
     const field = this.biomassFields.get(species);
     if (!field) return 0;
+    const before = this.speciesBiomassInRadius(species, x, y, radius);
     field.addRadial(x, y, radius, amount);
     for (let i = 0; i < field.data.length; i++) {
       field.data[i] = Math.min(BIOMASS_CELL_LIMIT, field.data[i] as number);
     }
-    const added = this.biomassInRadius(x, y, radius);
+    // Report what this instrument actually deposited (cells are capped, so the deposit can be less
+    // than requested). The previous version returned the *total* biomass standing in the radius
+    // across every species, which described the neighbourhood rather than the action.
+    const added = this.speciesBiomassInRadius(species, x, y, radius) - before;
     this.emit({
       tick: this.tick,
       kind: 'instrument',
@@ -1184,6 +1221,12 @@ export class World {
 
   /** Removes organisms inside a radius; the destructive instrument. */
   cull(x: number, y: number, radius: number, species?: SpeciesId): CullResult {
+    if (species !== undefined && !this.traits.has(species)) {
+      this.getSpecies(species);
+    }
+    if (!(radius >= 0) || !Number.isFinite(radius)) {
+      throw new InvariantError(`cull needs a finite, non-negative radius (got ${radius})`, { radius });
+    }
     const perSpecies: Record<SpeciesId, number> = {};
     let removed = 0;
     const r2 = radius * radius;
@@ -1215,8 +1258,13 @@ export class World {
 
   /** Places new individuals of a species (hatchery instrument / invasion event). */
   introduce(species: SpeciesId, count: number, x: number, y: number): number {
-    const traits = this.traits.get(species);
-    if (!traits) return 0;
+    const traits = this.getSpecies(species); // throws on an unknown id instead of returning 0
+    if (!Number.isInteger(count) || count < 1) {
+      throw new InvariantError(`introduce needs a positive whole count (got ${count})`, {
+        species,
+        count,
+      });
+    }
     const rng = this.rng.fork('introduce', this.tick + this.nextAgentId);
     const cap = this.config.populationCaps[species] ?? Number.POSITIVE_INFINITY;
     let placed = 0;
