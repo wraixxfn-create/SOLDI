@@ -1,123 +1,229 @@
-# WORLDBUG — Architecture
+# WORLDBUG — Stack e struttura
 
-> Reference for contributors. Complements `docs/DESIGN.md` (game rules) and `docs/REGISTRY.md`
-> (status/tests/open issues). Architectural decisions are recorded as ADRs in `docs/DECISIONS.md`.
+> Specifica di stack e confini dei moduli. Complementa `TECHNICAL_SPEC.md` (contratti e acceptance),
+> `DESIGN.md` (regole di gioco) e `REGISTRY.md` (stato di implementazione). Le decisioni architetturali
+> accettate sono registrate in `DECISIONS.md`.
 
-## 1. Shape of the system
+## 1. Valutazione e scelta dello stack
 
+Lo stack corrente è adatto a un gioco browser single-player con una mappa 2D, simulazione deterministica
+locale e interfaccia relativamente piccola. **Si mantiene lo stack: non c'è un vantaggio misurabile che
+giustifichi una migrazione.**
+
+| Tecnologia | Uso | Motivo della scelta |
+|---|---|---|
+| TypeScript 5, strict | Simulazione, logica e UI | Tipi per specie/eventi/azioni; `strict`, `noUncheckedIndexedAccess` e `no-non-null-assertion` aiutano a trovare errori ai confini dei dati. Compila in JavaScript standard. |
+| Vite 8 | Dev server e build statica | Avvio rapido, output statico con percorsi relativi (`base: './'`), nessun runtime Vite nel gioco. Il server locale lega `0.0.0.0` per preview/port forwarding. |
+| Canvas 2D nativo | Mappa e organismi | Adeguato a griglia e primitive 2D; nessun renderer o asset pipeline da scaricare. La UI resta separata dal Canvas. |
+| HTML e CSS nativi | Schermate, pannelli, controlli e accessibilità | Testo selezionabile e semantica DOM, tastiera e screen reader senza ricreare controlli dentro il Canvas. |
+| Web Audio API | Audio sintetico facoltativo | Nessun file audio o richiesta di rete; il gioco continua se l'API è assente o bloccata. |
+| Vitest | Test unitari e d'integrazione | Runner TypeScript coerente con Vite, adatto anche ai test headless del core. |
+| jsdom | Test UI DOM | Verifica dispatch e rendering dei pannelli senza introdurre un browser completo nei test quotidiani. |
+| ESLint + typescript-eslint | Analisi statica | Controlla errori e convenzioni TS; non è necessario aggiungere un secondo linter. |
+| Node.js 22.22.2+ | Tooling locale/test | Versione dichiarata in `package.json`; esegue harness TypeScript e script di bilanciamento. Non è richiesto al giocatore. |
+
+Il bundle di produzione non ha dipendenze JavaScript runtime. Vite, TypeScript, Vitest, jsdom ed ESLint
+sono strumenti di sviluppo/test, non servizi o librerie caricati dal browser. Sviluppo, test e build
+sono gratuiti e locali; nessun account o servizio cloud è necessario.
+
+### Framework UI: valutazione
+
+React, Vue, Svelte e simili non sono giustificati dalla UI attuale. `src/ui/app.ts` gestisce una shell
+DOM contenuta, un dispatcher esplicito e pannelli aggiornati in modo selettivo; aggiungere un framework
+comporterebbe runtime o pipeline e manutenzione senza risolvere un problema dimostrato. Rivalutare solo
+se la UI cresce significativamente (molte viste indipendenti, gestione complessa di form/stato o lavoro
+parallelo di più sviluppatori) e un prototipo mostra un vantaggio concreto su dimensione, accessibilità
+o manutenibilità. Non migrare per preferenza stilistica.
+
+### Test e lint
+
+- `npm run typecheck`: TypeScript in modalità strict su codice, test e configurazioni.
+- `npm run lint`: ESLint/TypeScript-ESLint; tipi espliciti, niente `any` o non-null assertion.
+- `npm test`: Vitest; test unitari per core e test d'integrazione UI su jsdom. Renderer provato con
+  contesto Canvas registrante, non con screenshot di un browser.
+- `npm run laws`, `npm run balance`: audit delle leggi e harness ecologico deterministici.
+- `npm run verify`: typecheck + lint + test + build di produzione.
+
+I test correnti coprono simulazione, contenuto, renderer e UI. Un browser E2E (per esempio Playwright)
+non è una dipendenza necessaria per lo sviluppo ordinario: aggiungerlo solo se una regressione critica
+non è verificabile con test esistenti o per una suite di rilascio browser ripetibile. Prima del rilascio
+restano necessarie prove manuali su browser reali, in particolare per Canvas, tastiera, audio e tecnologie
+assistive: jsdom non simula tali piattaforme.
+
+### Compatibilità e build
+
+La build punta a `es2022` (`vite.config.ts`) e richiede Canvas 2D per la mappa. Web Audio è opzionale;
+se Canvas 2D non è disponibile, pannelli e letture testuali devono rimanere utilizzabili. Il bundle usa
+`base: './'`, è statico e non richiede routing server-side. La compatibilità dichiarata è con browser
+moderni che implementano ES2022, moduli JavaScript, Canvas 2D e le API DOM usate; una matrice precisa di
+versioni browser va fissata solo quando il rilascio definisce i browser supportati e verificata con test
+reali.
+
+## 2. Struttura attuale e proprietà dei sistemi
+
+```text
+src/
+├── main.ts                  # bootstrap, error boundary globale
+├── core/                    # simulazione e meccaniche pure, senza DOM
+│   ├── errors.ts
+│   ├── field.ts             # campi scalari e operazioni sulla griglia
+│   ├── math.ts
+│   ├── rng.ts               # PRNG seeded
+│   └── sim/
+│       ├── species.ts       # tratti, fitness e regole comportamentali
+│       ├── sector.ts        # schema/validazione settore, clima e costruzione campi
+│       ├── world.ts         # agenti, ecosistema e mutazioni del mondo
+│       ├── events.ts        # eventi, ring buffer e aggregati
+│       └── metrics.ts       # probe, storia e metriche derivate
+├── content/                 # dati authored: non è codice di schermata
+│   ├── species.ts           # catalogo specie e parametri
+│   ├── sectors.ts           # cinque configurazioni iniziali di mondo/campagna
+│   ├── laws.ts              # proposizioni generate dai parametri/osservazioni
+│   └── law-fairness.ts      # audit di equità del Codex
+├── domain/                  # contratti cross-module e validazione dati importati
+│   ├── contracts.ts
+│   └── validation.ts
+├── game/                    # regole della missione e stato applicativo
+│   ├── session.ts           # lifecycle, tick, azioni, budget e report
+│   ├── instruments.ts       # definizioni e validazione degli strumenti
+│   ├── grading.ts           # score/rank e feedback
+│   ├── state.ts             # tipi e stato dell'app
+│   ├── store.ts             # store osservabile minimale
+│   ├── persistence.ts       # profilo versionato in localStorage
+│   └── audio.ts             # Web Audio, opzionale
+├── render/                  # Canvas 2D e palette, senza regole di simulazione
+│   ├── renderer.ts
+│   └── palettes.ts
+└── ui/                      # DOM, input, layout e accessibilità
+    ├── app.ts               # dispatcher e frame loop
+    ├── a11y.ts
+    └── styles.css
+
+tests/                       # specchiati per core, render e ui
+ tools/                       # harness locali (balance, laws, trace)
 ```
-                         ┌──────────────────────────────────────────────┐
-                         │                    main.ts                   │
-                         │  boot: config → store → UI → loop → save      │
-                         └───────┬───────────────┬──────────────┬───────┘
-                                 │               │              │
-             ┌───────────────────▼──┐   ┌────────▼────────┐  ┌──▼─────────────┐
-             │  core/  (pure, no DOM)│   │ ui/ (DOM only)  │  │ render/ (canvas)│
-             │  rng · field · sim    │   │ panels, screens │  │ field+agent draw│
-             │  events · metrics     │   │ dialogs, a11y   │  │ overlays, fx    │
-             └───────────────────┬───┘   └────────┬────────┘  └──┬─────────────┘
-                                 │                │              │
-                        ┌────────▼────────────────▼──────────────▼────────┐
-                        │        game/  orchestration & state             │
-                        │ store · session · instruments · evidence ·      │
-                        │ propositions · grading · persistence · audio    │
-                        └─────────────────────────────────────────────────┘
+
+### Responsabilità e confini logici
+
+- **Simulazione:** `core/sim/world.ts`, con `field.ts`, `rng.ts`, `sim/species.ts` ed `events.ts`.
+  Avanza la biosfera e applica trasformazioni fisiche, ma non conosce DOM, UI, Canvas, audio o SDK.
+- **Regole di gioco:** le regole ecologiche sono applicate dal core; le regole della missione (azioni,
+  costi, lifecycle, report) sono in `game/`. Le proposizioni e le regole di contenuto del Codex sono
+  in `content/laws.ts`; `game/grading.ts` calcola il risultato.
+- **Generazione/configurazione mondi:** non esiste generazione procedurale di campagna. `content/sectors.ts`
+  è la fonte autoriale dei mondi; `core/sim/sector.ts` valida i dati e costruisce i campi iniziali/clima.
+  La casualità di popolamento e comportamento è seeded in `World`. Non duplicare la configurazione
+  nello strato UI.
+- **Gameplay/orchestrazione:** `game/session.ts` possiede la missione e instrada le azioni verso core;
+  `game/instruments.ts` è il catalogo e il validatore dei comandi, non una seconda simulazione.
+- **Rendering:** `render/renderer.ts` legge mondo e stato visuale; palette e coordinate sono
+  responsabilità render. Il renderer non decide effetti, costi o risultati.
+- **Interfaccia:** `ui/` riceve input, presenta dati e invia intenti tipizzati tramite `dispatch`.
+  `main.ts` effettua il bootstrap e intercetta errori fuori dal flusso normale.
+- **Persistenza:** attualmente `game/persistence.ts`, tenuta distinta per responsabilità dal loop e
+  dalla simulazione: serializza solo progressione/impostazioni e gestisce schema/errori storage.
+- **Audio:** attualmente `game/audio.ts`, adattatore isolato per Web Audio; non ha accesso a regole
+  ecologiche e non è mai prerequisito per gameplay.
+- **Analytics e integrazioni esterne:** non implementate e fuori perimetro v1. Non creare cartelle
+  vuote o dipendenze fittizie. In caso di decisione futura, aggiungere moduli isolati (`analytics/`,
+  `integrations/`) dietro interfacce opzionali, senza import nel core e senza bloccare il gioco quando
+  il servizio manca; qualsiasi telemetria richiederà prima una decisione esplicita su consenso,
+  privacy, rete e impatto sul gioco.
+
+I moduli di persistenza e audio si trovano ancora sotto `game/` per mantenere l'albero piccolo: sono
+file autonomi e dipendenze iniettate/consumate dalla shell; non serve spostarli finché il numero di
+file e la collaborazione non rendono la collocazione un problema. Se la cartella `game/` si allarga,
+si possono estrarre in `persistence/` e `audio/` con un vantaggio di navigazione dimostrabile, senza
+cambiare contratti o stack.
+
+## 3. Grafo delle dipendenze
+
+```text
+                    ┌──────────────┐
+                    │   main.ts    │
+                    └──────┬───────┘
+                           ▼
+                   ┌─────────────────────┐
+                   │         ui          │
+                   └───┬────┬────┬───────┘
+                       │    │    │
+             ┌─────────┘    │    └──────────┐
+             ▼              ▼               ▼
+       ┌──────────┐   ┌──────────┐   ┌──────────────┐
+       │   game   │   │  render  │   │ persistence  │
+       └────┬─────┘   └────┬─────┘   └──────────────┘
+            │              │        ┌──────────────┐
+            ├───────┐      │        │    audio     │
+            ▼       ▼      ▼        └──────────────┘
+       ┌────────┐ ┌─────────┐
+       │ content│ │  core   │
+       └───┬────┘ └────▲────┘
+           └───────────┘
 ```
 
-Hard rules enforced by lint/test:
+Le frecce rappresentano dipendenze di codice, non necessariamente import diretti da ogni sottosistema.
+UI crea/usa le API game e renderer; `Mission` usa i dati content e le API core. Persistence/audio
+sono adattatori a cui l'applicazione delega le operazioni laterali. `domain/` è un facade di contratti
+ad alto livello usato dalle validazioni/test: può riferirsi a core, content e game, ma non è importato
+dal core e non è un nuovo livello da cui la simulazione dipende.
 
-1. **`core/` never imports `ui/`, `render/` or `game/`.** It is deterministic, side-effect-free,
-   testable in plain Node, and free of `window`/`document`.
-2. **`ui/` never mutates simulation state.** It renders from the store and dispatches intents.
-3. **`render/` is a pure function of a snapshot** it is handed; it owns no game logic and tolerates a
-   missing 2D context (returns a descriptive status instead of throwing).
-4. **All random numbers in `core/` come from the injected seeded PRNG** — never `Math.random`.
+### Regole non negoziabili
 
-## 2. Modules
+1. `core/` importa solo `core/` e tipi puri; niente `window`, `document`, Canvas, `localStorage`, rete,
+   audio, UI, game o SDK.
+2. `content/` può importare `core/` e dati content; non importa `game/`, UI, renderer o browser API.
+3. `game/` può importare core/content e i contratti degli adattatori storage/audio; non manipola DOM.
+4. `render/` può leggere core e tipi visuali; non importa `game/` per cambiare stato. Input/output
+   visuali sono valori espliciti.
+5. `ui/` può orchestrare game, render, persistenza e audio; non muta `World` o `Budget` direttamente.
+6. Integrazioni future (analytics, ads, servizi cloud) possono essere chiamate solo da un adapter
+   esplicito usato dalla shell/app, mai da core/content/render. Sono disabilitate per default e non
+   possono diventare una dipendenza necessaria al caricamento o al loop.
+7. Evitare cicli, service locator globali e bus eventi generici. Preferire tipi condivisi piccoli,
+   chiamate dirette e risultati `Result` tipizzati alle dimensioni attuali.
 
-### `src/core/` — deterministic simulation
-| File | Responsibility |
-| --- | --- |
-| `rng.ts` | `mulberry32` seeded PRNG + `Rng` helper (int, range, gauss, pick, fork). |
-| `math.ts` | `clamp`, `lerp`, `smoothstep`, `bellFit`, `wrapIndex`, `mean`, safe division. |
-| `field.ts` | `ScalarField` grid: bilinear sampling, diffusion, relaxation, radial pulses, statistics. |
-| `sim/species.ts` | Species definitions (traits + *hidden law parameters*) and their derived descriptors. |
-| `sim/sector.ts` | `SectorConfig` schema, terrain sources, `validateSector()` with actionable errors. |
-| `sim/events.ts` | Bounded event log ring buffer with typed events and filtering. |
-| `sim/world.ts` | `World`: agents, spatial hash, biomass fields, `step()` with all ecosystem rules. |
-| `sim/metrics.ts` | Population/biomass sampling, probes, extinction detection, stability index. |
+## 4. Flusso di un frame e di un'azione
 
-### `src/content/` — authored data
-| File | Responsibility |
-| --- | --- |
-| `species.ts` | The species catalogue (names, codes, palettes, trait blocks). |
-| `sectors.ts` | The five campaign sectors, fully configured and validated at import time. |
-| `laws.ts` | Law proposition definitions per sector, derived from the real hidden parameters. |
-| `tutorial.ts` | Scripted, non-blocking briefing steps for sector 1. |
+```text
+requestAnimationFrame → ui/app.frame(time)
+  ├─ accumula tempo reale e determina tick interi (velocità/pausa)
+  ├─ Mission.advance(tickCount) → World.run(n) → World.step()
+  ├─ legge stato e metriche per aggiornare pannelli DOM quando necessario
+  └─ Renderer.draw(world, renderState)
 
-### `src/game/` — orchestration
-| File | Responsibility |
-| --- | --- |
-| `store.ts` | ~120-line observable store (`get`, `set`, `subscribe`, `select`). No framework. |
-| `state.ts` | Application state tree + `createInitialState`, sector loading, tick accounting. |
-| `session.ts` | Mission lifecycle: start, tick budget, speed control, filing, results, progression. |
-| `instruments.ts` | Instrument catalogue, charge/integrity accounting, `applyInstrument()` validation. |
-| `evidence.ts` | Derived statistics (with `n=`) computed from probes + event log for Data Assists. |
-| `propositions.ts` | Proposition instances, answering, confidence, correctness resolution. |
-| `grading.ts` | Report evaluation, score/rank computation, per-proposition feedback. |
-| `persistence.ts` | Versioned `localStorage` save file, migration, corruption recovery. |
-| `audio.ts` | Web Audio synthesised SFX/music beds; no assets; degrades silently when unavailable. |
-
-### `src/render/` and `src/ui/`
-* `render/renderer.ts` — `Renderer` class: layered canvas painting (terrain → fields → biomass →
-  organisms → tools → cursor), DPR-aware sizing, adaptive quality, reduced-motion aware.
-* `ui/app.ts` — builds the DOM shell once and re-renders panels from store slices.
-* `ui/panels/*` — mission HUD, instrument bar, inspector, data/charts, codex, log, settings, help.
-* `ui/screens.ts` — title, sector select, briefing, results, ending.
-* `ui/a11y.ts` — live-region announcer, focus management, keyboard help, canvas text summary.
-
-## 3. Data flow of one frame
-
-```
-loop(frame)                       session.tickDue()          world.step()
-  ├─ accumulate real dt ─────────▶ ticks to run (speed) ─────▶ simulate
-  ├─ if paused: run 0 ticks
-  ├─ worldSnapshot = world.sample()  (population, fields extrema, probe readings)
-  ├─ store.patch({ snapshot })  ──▶ subscribers: ui re-render (only dirty panels)
-  └─ renderer.draw(snapshot, uiState)
+input DOM/Canvas → Action → dispatch → Mission/Store
+  └─ esito ok/failure → feedback UI; persistenza profilo quando pertinente
 ```
 
-Panels subscribe to *slices*; a DOM patch is skipped when the slice is unchanged (cheap reference
-comparison), so a 60 fps render loop does not thrash the DOM.
+Il tempo reale regola la presentazione, non le formule della simulazione: con lo stesso seed e lo stesso
+elenco ordinato di azioni e tick, l'esito non cambia al variare del frame rate. La pausa esegue zero
+tick. Il renderer non è il proprietario del loop di regole.
 
-## 4. Determinism and the fairness invariant
+## 5. Errori e degradazione
 
-`World` is constructed from `(SectorConfig, seed, options)`. Instruments are applied through
-`applyInstrument()` which returns a *new* log entry and mutates the world only through the same code
-paths the test suite exercises. Because there is no wall-clock dependency, a test can run 20 000
-ticks in milliseconds and assert ecological outcomes.
+| Sistema | Comportamento in errore |
+|---|---|
+| Core/contenuti | `WorldBugError`, `ContentError` o `InvariantError` per input/configurazioni impossibili; validazione ai confini e test. |
+| Azioni gameplay | Esito `{ ok: false, reason }` per limiti normali del giocatore; nessuna eccezione o spesa parziale. |
+| Persistenza | Warning su save invalido/storage bloccato; avvio con profilo pulito o gioco senza salvataggio. |
+| Canvas | Avviso e UI DOM/testo funzionante quando il contesto non è disponibile. |
+| Audio | Stato non disponibile/silenzioso senza bloccare le azioni. |
+| Errore non gestito | Overlay recuperabile e diagnostica in `main.ts`, non pagina vuota. |
+| Integrazioni future | Adapter non disponibile = funzionalità opzionale disattivata; core e loop non attendono la rete. |
 
-**Fairness invariant (tested):** for every proposition in every sector, the correct option is
-entailed by the sector configuration, and a scripted "ideal scientist" strategy — one that observes
-the field extremes and the event log, then applies the mirror instrument to probe a species' niche —
-can distinguish the correct option from the distractors within the sector's Charge budget. The test
-`tests/core/fairness.test.ts` asserts both halves of this for all five sectors.
+## 6. Comandi e criteri di mantenimento
 
-## 5. Error handling policy
+```sh
+npm run dev       # Vite in locale
+npm run typecheck
+npm run lint
+npm test
+npm run laws      # audit delle proposizioni
+npm run balance   # bilanciamento headless
+npm run verify    # suite completa + build statica
+```
 
-| Layer | Policy |
-| --- | --- |
-| `core/` | Validates inputs, throws typed `WorldBugError`s with actionable messages for programming errors; never throws for player-triggered edge cases (returns structured failures). |
-| `game/` | Every player action returns `{ ok: true, … } \| { ok: false, reason }`; the UI shows the reason as a toast — no silent failures, no dead buttons. |
-| `render/` | Missing 2D context, zero-sized canvas or lost context degrade to a status message; the DOM UI remains fully usable. |
-| `audio/` | Any `AudioContext` failure disables audio and surfaces a notice in Settings. |
-| `persistence/` | Corrupt/foreign save data is quarantined (`worldbug.save.corrupt`) and a clean profile is created; the player is told. |
-| global | `main.ts` installs `window.onerror`/`unhandledrejection` handlers that show a recoverable error overlay with a "copy diagnostics" button instead of a blank screen. |
-
-## 6. Build & distribution
-
-* `npm run build` → `dist/` with a single relative-referenced bundle (`base: './'`), no network calls,
-  no external fonts, no assets beyond HTML/CSS/JS/SVG-inline.
-* `dist/` is zipped by `npm run package` into `worldbug-html5.zip` for portal submission, with a
-  `PORTAL.md` checklist for the common HTML5 aggregators (responsive canvas, mute-on-blur,
-  no external links during play, paused when hidden).
+Non aggiungere una dipendenza se una API browser nativa o un modulo locale piccolo copre già il caso.
+Ogni nuova libreria deve avere una responsabilità non già coperta, costo bundle/build noto, licenza
+compatibile, manutenzione attiva e strategia di test. Ogni nuova cartella deve rappresentare un dominio
+con proprietario e API definite, non essere creata solo per anticipare una possibile crescita.

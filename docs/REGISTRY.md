@@ -27,6 +27,7 @@ features — see *Open issues*.
 | Campaign sectors (5) | `src/content/sectors.ts` | Done | validation + viability tests |
 | Deduction layer | `src/content/laws.ts` | Done | `tests/core/laws.test.ts` (21) |
 | Law fairness audit | `src/content/law-fairness.ts` | Done | same suite (ADR-008) |
+| Domain contracts / imported-data validation | `src/domain/contracts.ts`, `validation.ts` | Done | `tests/domain/contracts.test.ts` (4) |
 | Balance harness | `tools/balance.ts` | Done | `npm run balance` |
 | Species tracer | `tools/trace.ts` | Done | `npm run trace` |
 | Law audit | `tools/laws.ts` | Done | `npm run laws` |
@@ -42,7 +43,7 @@ features — see *Open issues*.
 | UI shell + a11y | `src/ui/app.ts`, `ui/a11y.ts` | Done | `tests/ui/app.test.ts` (17) |
 | Shell markup / boot | `index.html`, `src/main.ts`, `styles.css` | Done | mounted by the UI tests; real dev server exercised |
 
-**Test totals:** 10 files, 161 tests (`npm test`). Typecheck and lint clean (0 errors, 0 warnings).
+**Test totals:** 11 files, 166 tests (`npm test`, as verified 2026-10-16). Typecheck and lint clean (0 errors, 0 warnings).
 
 ## 2. Evidence the world works
 
@@ -50,12 +51,12 @@ Executed, in the state committed with this document:
 
 - `npx tsc --noEmit -p tsconfig.json` → clean.
 - `npx eslint .` → clean (0 errors, 0 warnings).
-- `npx vitest run` → **161 passed / 10 files**, 47 s (the five sector viability runs are ~29 s of that).
+- `npm run verify` → **166 passed / 11 files**, typecheck/lint clean, production build succeeded (54.0 s for tests in this run; the five sector viability runs are ~31 s).
 - `npm run balance -- 0 '' --seeds=3` → **no local extinctions** in 15 sector/seed runs, every species
   of every sector still alive at the end of its survey horizon.
 - `npm run laws` → every proposition unambiguous, verifiable with the instruments the sector ships,
   and consistent with observed births (0 unfair).
-- `npm run build` → `dist/index.html` 6.1 kB, CSS 6.6 kB, JS 123.6 kB (40.3 kB gzipped), 28 modules,
+- `npm run build` → `dist/index.html` 6.14 kB, CSS 6.77 kB, JS 123.74 kB (40.37 kB gzipped), 28 modules,
   zero assets — the whole game is HTML + JS + CSS.
 - `npm run dev` → Vite dev server on `0.0.0.0:5173`; `index.html`, `src/main.ts`, the UI modules and
   the stylesheet are all served (HTTP 200), so the game boots in a browser.
@@ -96,7 +97,7 @@ Ordered by what would stop a release first.
 4. ~~**`computeFieldDistributions` caches by `config.id`.**~~ **Closed 2026-10-16.** The cache is a
    `WeakMap` keyed by the config *object*, so two configurations sharing an id can never collide;
    `tests/core/sector.test.ts` covers exactly that case.
-5. ~~**DOM tests are not written yet.**~~ **Closed 2026-10-16.** `tests/ui/app.test.ts` (17 tests)
+5. ~~**DOM tests are not written yet.**~~ **Closed 2026-10-16.** `tests/ui/app.test.ts` (18 tests)
    mounts the real `index.html` in jsdom and drives the game through its dispatch API;
    `tests/render/renderer.test.ts` (8 tests) drives the renderer against a recording 2D context.
 6. **Balance is measured on 3 seeds.** Extinction-free on the sector's own seed and two derived seeds;
