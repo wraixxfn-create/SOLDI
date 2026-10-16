@@ -41,52 +41,76 @@ Three pillars, in tension with each other:
 
 ## 3. The simulation
 
-### 3.1 Space and fields
+### 3.1 Territory, climate and resources
 
-* The sector is a `W × H` grid of cells (48×32 by default) rendered as a hexagon-free grid map.
-* Three continuous scalar fields evolve every tick:
-  * **Temperature** (K, 150–450 range),
-  * **Humidity** (0–1),
-  * **Light** (0–1).
-* Terrain *sources* (thermal vents, cryo seeps, mist basins, crystal luminaries, shade canyons)
-  push the fields toward a local target with radial falloff. Fields diffuse, then relax weakly
-  toward the sector baseline. The result is a stable-but-heterogeneous environment: **geography is
-  the first thing a player learns to read**.
+* A world owns a finite, closed `W × H` rectangle of square grid cells (`W: 16–128`, `H: 12–128`).
+  Organisms reflect at its edge; terrain sources, pulses, barriers, resource grids and biomass share
+  these coordinates. The dimensions and every initial value are explicit in `SectorConfig`.
+* Three climate fields describe conditions, not consumable stocks:
+  * **Temperature** in kelvin, clamped to **150–450 K**;
+  * **Humidity** as normalized saturation, **0–1**;
+  * **Light** as normalized irradiance, **0–1**.
+* Two spatial resources are separately modeled and have their own unit limits:
+  * **Available water**: normalized stock **0–1 per cell**, recharged toward local humidity, evaporated
+    and diffused every turn;
+  * **Mineral nutrients**: abstract stock **0–4 units per cell**, regenerated at the configured rate,
+    diffused, consumed by photosynthetic species and returned by decomposers.
+* Standing organic biomass is **0–4 abstract biomass units per cell per species**. Producers deposit
+  biomass; consumers remove it; decomposers mineralize consumed organic stock. It is distinct from
+  the water and mineral resource grids.
+* Terrain sources (thermal, cryogenic, mist/arid, lumen/shade) alter climate with radial falloff.
+  Fields diffuse and relax toward their baseline. Their definitions, pulses, resource rates and rule
+  documents are validated before `World` construction.
 
-### 3.2 Organisms
+### 3.2 Species and turn lifecycle
 
-Each organism is an agent with continuous position, energy, age and per-species traits.
-Every tick, in deterministic order:
+Species data is parameterized rather than implemented by duplicating species-specific update logic.
+Each definition supplies its trophic role and strategy, diet, tolerance, water/nutrient demand, energy
+budget, reproduction threshold/cost/cooldown/maturity/lifespan, stress response, speed, wandering,
+sensory radius and optional typed mutualism/mineralization values. Four starter strategies are
+provided: photosynthetic (`PHY-1`), predatory (`PRE-1`), decomposer (`DEC-1`) and symbiotic (`SYM-1`).
+The 12 authored campaign species continue to use the same shared engine.
 
-1. **Sensing** — sample the three fields and the biomass of every diet species at its position.
-2. **Fitness** — `fit = fitT × fitH × fitL`, where each term is a two-sided bell curve around the
-   species' *hidden* ideal value. `0 ≤ fit ≤ 1`.
-3. **Feeding**
-   * *Producer*: gains energy from `fit` (photosynthesis analogue: light, temperature and moisture
-     all matter).
-   * *Consumer*: intake is limited by the *actual* biomass of its diet species in the cell, so
-     depletion is physical, not scripted. Predators additionally record a **kill event** when they
-     take prey individuals.
-4. **Metabolism** — energy drains at a rate scaled by exposure (low `fit`), movement and age.
-5. **Desperation movement** — an agent whose energy falls below its comfort threshold samples the
-   fitness of its own cell vs. its neighbours (a real gradient estimate of the true fitness
-   function) and moves upslope; otherwise it wanders with per-agent noise and species speed.
-6. **Reproduction** — above an energy threshold, once mature and off cooldown, and only when the
-   local food supply is not exhausted: the agent pays an energy cost and spawns an offspring with
-   slight inherited trait variance.
-7. **Death** — starvation (energy ≤ 0), exposure (sustained `fit` below the lethal threshold), old
-   age (lifespan), or predation. Every death is logged **with its cause**: this is evidence.
+One discrete turn follows this exact causal order (`WORLD_TICK_PHASES`):
 
-Biomass is a real quantity: organisms deposit part of their energy into their species' biomass
-field, and consumers remove it. Energy is not conserved perfectly (metabolism burns it) but mass
-transfers are — over-grazing really does starve the producers.
+1. **Environment** — advance the tick, scheduled pulses, terrain persistence/diffusion/relaxation and
+   configured environment rules.
+2. **Resource availability** — recharge, evaporate and diffuse water; regenerate/diffuse nutrients;
+   decay and spread standing biomass.
+3. **Metabolism** — sample climate, update stress/age/cooldown and pay the baseline metabolic and
+   exposure costs.
+4. **Interactions** — photosynthesis constrained by local water/nutrients; biomass feeding and
+   predation; decomposition/mineralization; pairwise symbiosis. Movement decisions are planned from
+   the same positions and committed after all plans are chosen.
+5. **Reproduction** — eligible parents pay their configured cost and reserve population-cap slots;
+   newborn records are queued and are not updated in the turn they are born.
+6. **Mortality** — resolve interaction-caused deaths, starvation, age and sustained exposure.
+7. **State update** — compact dead agents, commit the queued newborns, update extinctions, events,
+   probes and population history.
 
-### 3.3 Determinism
+Within interacting organisms, the simulation uses stable ascending agent ids; rule ties use stable
+rule ids. Food and local capacity are therefore arbitrated intentionally, never by incidental array
+insertion order. New positions are committed as a separate movement pass, preventing a predator's
+sensing result from changing because its prey happened to be iterated first.
 
-The whole simulation is a pure function of `(sectorConfig, seed, orderedActions)`:
-a seeded PRNG (mulberry32) is the only randomness, the timestep is fixed, and there are no wall-clock
-or `Math.random` dependencies. Replaying the same inputs yields the same world — this is what makes
-the puzzle fair and the test suite meaningful.
+### 3.3 Determinism and rendering boundary
+
+The world is a pure replay of `(validated config, explicit seed, ordered actions)`. Mulberry32 is the
+only pseudorandom generator. Initial placement uses per-species streams; hunts, movement and births
+use streams derived from agent id, tick and generation, so one subsystem or an unrelated organism
+cannot shift another's random sequence. Simulation code never reads wall-clock time or `Math.random`.
+The renderer is read-only: drawing or changing overlays cannot affect world state or random streams.
+
+### 3.4 Declarative rule engine
+
+World rules are JSON-safe data with a stable id, integer priority, `stack` or grouped `exclusive`
+mode, `each-turn` or `once` frequency, a prerequisite expression and one or more typed effects.
+Prerequisites are a closed AST (`all`, `any`, `not`, field/resource means, population, population
+ratio, biomass and tick comparisons). Effects are a closed set of field/resource shifts and
+species-scoped metabolism/growth/reproduction multipliers. A bounded parser rejects unknown keys,
+operations, species, coordinates, values, excessive nesting and non-plain objects. Rules are sorted
+by priority then id and evaluated from one immutable turn observation; no `eval`, callbacks, script
+strings or arbitrary level code are accepted.
 
 ## 4. Player capabilities
 

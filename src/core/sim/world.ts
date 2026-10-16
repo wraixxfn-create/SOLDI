@@ -1,7 +1,7 @@
 import { ScalarField, FIELD_IDS, type FieldId, type FieldStats } from '../field.ts';
 import { Rng } from '../rng.ts';
 import { clamp, clamp01, safeDiv, finite } from '../math.ts';
-import { InvariantError, invariant } from '../errors.ts';
+import { ContentError, InvariantError, invariant } from '../errors.ts';
 import {
   STRESS_BEHAVIOUR,
   fitnessAt,
@@ -10,6 +10,20 @@ import {
   type SpeciesTraits,
   type TrophicRole,
 } from './species.ts';
+import {
+  RESOURCE_LIMITS,
+  advanceResourceFields,
+  buildResourceFields,
+  shiftResource,
+  type ResourceFields,
+} from './resources.ts';
+import {
+  RuleEngine,
+  parseRuleSet,
+  type EcosystemRule,
+  type RuleEffect,
+  type RuleObservation,
+} from './rules.ts';
 import {
   EventLog,
   countEvent,
@@ -32,10 +46,12 @@ import {
 import {
   DEFAULT_DIFFUSION,
   DEFAULT_RELAXATION,
+  FIELD_LIMITS,
   advanceFields,
   applyScheduledPulses,
+  assertValidWorldConfig,
   buildFields,
-  type SectorConfig,
+  type WorldConfig,
 } from './sector.ts';
 
 /**
@@ -47,13 +63,13 @@ import {
  * the DOM, the clock, or `Math.random`. Two worlds built with the same seed and fed the same
  * instrument calls produce identical histories (asserted by `tests/core/determinism.test.ts`).
  *
- * ## Physics summary (see docs/DESIGN.md §3)
- * Each tick: environment → sensing → feeding → metabolism → movement → reproduction → death.
- * Biomass is a real, spatially resolved quantity: autotrophs deposit it, consumers remove it, and
- * whoever is removed pays for it with energy. Nothing is scripted.
+ * ## Tick order (see docs/DESIGN.md §3)
+ * Environment → resource availability → metabolism → interactions → reproduction → mortality →
+ * state update. Stable ids arbitrate shared food; movement is planned from one shared position
+ * snapshot, and births are queued until the final phase.
  *
  * ## Scratch buffers
- * `updateAgent` reuses `scratchReadings` for speed. Any *stored* reading (event snapshots) is
+ * `fitnessAtPosition` reuses `scratchReadings` for speed. Any *stored* reading (event snapshots) is
  * re-read with the allocating `readingsAt()` so a snapshot can never alias the scratch object.
  */
 
@@ -83,7 +99,7 @@ export interface Barrier {
 }
 
 export interface WorldOptions {
-  readonly config: SectorConfig;
+  readonly config: WorldConfig;
   readonly species: readonly SpeciesDefinition[];
   readonly seed: number;
   /** Field diffusion rate per tick (0..0.25). */
@@ -107,6 +123,7 @@ export interface WorldSnapshot {
   readonly stability: number;
   readonly barriers: readonly Barrier[];
   readonly fields: Readonly<Record<FieldId, ScalarField>>;
+  readonly resources: Readonly<ResourceFields>;
   readonly biomassFields: ReadonlyMap<SpeciesId, ScalarField>;
   readonly extinctions: readonly SpeciesId[];
 }
@@ -121,6 +138,57 @@ export const EXPOSURE_LETHAL_TICK_LIMIT = 110;
 export const MOVE_DECISION_INTERVAL = 3;
 export const HASH_CELL_SIZE = 4;
 
+/** Canonical causal order for one discrete simulation turn. */
+export const WORLD_TICK_PHASES = Object.freeze([
+  'environment',
+  'resource-availability',
+  'metabolism',
+  'interactions',
+  'reproduction',
+  'mortality',
+  'state-update',
+] as const);
+
+interface AgentTurnState {
+  readonly agent: Agent;
+  readonly traits: SpeciesTraits;
+  readonly fitness: number;
+  readonly density: number;
+  readonly behaviour: (typeof STRESS_BEHAVIOUR)[keyof typeof STRESS_BEHAVIOUR];
+}
+
+interface AgentMovementPlan {
+  readonly agent: Agent;
+  readonly x: number;
+  readonly y: number;
+  readonly dx: number;
+  readonly dy: number;
+  readonly travelled: number;
+}
+
+interface PendingBirth {
+  readonly parentId: number;
+  readonly species: SpeciesId;
+  readonly x: number;
+  readonly y: number;
+  readonly parentX: number;
+  readonly parentY: number;
+  readonly energy: number;
+  readonly generation: number;
+  readonly rng: Rng;
+}
+
+interface SpeciesRuleModifier {
+  metabolism: number;
+  growth: number;
+  reproduction: number;
+}
+
+const BASE_RULE_MODIFIER: Readonly<SpeciesRuleModifier> = Object.freeze({
+  metabolism: 1,
+  growth: 1,
+  reproduction: 1,
+});
 
 const BIOMASS_DECAY = 0.0022;
 const BIOMASS_SPREAD = 0.1;
@@ -178,9 +246,10 @@ const SAMPLE_INTERVAL = 25;
 const PROBE_INTERVAL = 10;
 
 export class World {
-  readonly config: SectorConfig;
+  readonly config: WorldConfig;
   readonly seed: number;
   readonly fields: Record<FieldId, ScalarField>;
+  readonly resources: ResourceFields;
   readonly biomassFields: Map<SpeciesId, ScalarField> = new Map();
   readonly traits: ReadonlyMap<SpeciesId, SpeciesTraits>;
   readonly events: EventLog;
@@ -197,6 +266,9 @@ export class World {
 
   private readonly rng: Rng;
   private readonly movementRng: Rng;
+  private readonly ruleEngine: RuleEngine;
+  private readonly ruleModifiers = new Map<SpeciesId, SpeciesRuleModifier>();
+  private readonly pendingDeaths = new Map<number, DeathCause>();
   private readonly history: PopulationSample[] = [];
   private readonly historyCapacity: number;
   private readonly diffusion: number;
@@ -218,30 +290,54 @@ export class World {
 
   constructor(options: WorldOptions) {
     const { config } = options;
-    this.config = config;
-    this.seed = (options.seed ?? config.seed) >>> 0;
+    if (!Number.isInteger(options.seed)) {
+      throw new ContentError(`World ${config.id} needs an explicit integer seed`, { seed: options.seed });
+    }
+
+    const traitMap = new Map<SpeciesId, SpeciesTraits>();
+    for (const definition of options.species) {
+      if (traitMap.has(definition.id)) {
+        throw new ContentError(`Duplicate species definition "${definition.id}"`, { species: definition.id });
+      }
+      if (definition.id !== definition.traits.code) {
+        throw new ContentError(`Species id/code mismatch for "${definition.id}"`, {
+          id: definition.id,
+          code: definition.traits.code,
+        });
+      }
+      traitMap.set(definition.id, snapshotSpeciesTraits(definition.traits));
+    }
+    assertValidWorldConfig(config, new Map(options.species.map((definition) => [definition.id, definition])));
+    const parsedRules = parseRuleSet(config.rules, {
+      width: config.width,
+      height: config.height,
+      species: config.roster,
+    });
+    this.ruleEngine = new RuleEngine(parsedRules.rules);
+
+    this.config = snapshotWorldConfig(config, parsedRules.rules);
+    this.seed = options.seed >>> 0;
     this.rng = new Rng(this.seed).fork('world');
     this.movementRng = new Rng(this.seed).fork('movement');
     this.diffusion = options.diffusion ?? DEFAULT_DIFFUSION;
     this.relaxation = options.relaxation ?? DEFAULT_RELAXATION;
     this.events = new EventLog(options.eventCapacity ?? 4000);
     this.historyCapacity = options.populationHistoryCapacity ?? 600;
-
-    const traitMap = new Map<SpeciesId, SpeciesTraits>();
-    for (const def of options.species) traitMap.set(def.id, def.traits);
     this.traits = traitMap;
 
-    this.fields = buildFields(config) as Record<FieldId, ScalarField>;
-    for (const id of config.roster) {
-      invariant(traitMap.has(id), `Sector ${config.id} rosters unknown species ${id}`);
-      this.biomassFields.set(id, new ScalarField(config.width, config.height, 0));
+    this.fields = buildFields(this.config) as Record<FieldId, ScalarField>;
+    this.resources = buildResourceFields(this.config.width, this.config.height, this.config.resources);
+    for (const id of this.config.roster) {
+      invariant(traitMap.has(id), `World ${this.config.id} rosters unknown species ${id}`);
+      this.biomassFields.set(id, new ScalarField(this.config.width, this.config.height, 0));
       this.birthMoments.set(id, createMoments());
       this.populationCounts.set(id, 0);
       this.intakeGraph.set(id, new Map());
+      this.ruleModifiers.set(id, { metabolism: 1, growth: 1, reproduction: 1 });
     }
 
-    this.bucketCols = Math.ceil(config.width / HASH_CELL_SIZE);
-    this.bucketRows = Math.ceil(config.height / HASH_CELL_SIZE);
+    this.bucketCols = Math.ceil(this.config.width / HASH_CELL_SIZE);
+    this.bucketRows = Math.ceil(this.config.height / HASH_CELL_SIZE);
     for (let i = 0; i < this.bucketCols * this.bucketRows; i++) this.buckets.push([]);
 
     this.seedInitialPopulation();
@@ -252,8 +348,8 @@ export class World {
   // ---------------------------------------------------------------- construction / setup
 
   private seedInitialPopulation(): void {
-    const spawnRng = this.rng.fork('initial-population');
-    for (const species of this.config.roster) {
+    for (const species of [...this.config.roster].sort(compareIds)) {
+      const spawnRng = this.rng.fork(`initial-${species}`);
       const target = this.config.initialPopulations[species] ?? 0;
       const traits = this.traits.get(species);
       if (!traits) continue;
@@ -327,7 +423,7 @@ export class World {
 
   counts(): Record<SpeciesId, number> {
     const out: Record<SpeciesId, number> = {};
-    for (const id of this.config.roster) out[id] = this.populationCounts.get(id) ?? 0;
+    for (const id of [...this.config.roster].sort(compareIds)) out[id] = this.populationCounts.get(id) ?? 0;
     return out;
   }
 
@@ -342,13 +438,13 @@ export class World {
 
   biomassReport(): Record<SpeciesId, number> {
     const out: Record<SpeciesId, number> = {};
-    for (const id of this.config.roster) out[id] = this.speciesBiomass(id);
+    for (const id of [...this.config.roster].sort(compareIds)) out[id] = this.speciesBiomass(id);
     return out;
   }
 
   totalBiomass(): number {
     let sum = 0;
-    for (const id of this.config.roster) sum += this.speciesBiomass(id);
+    for (const id of [...this.config.roster].sort(compareIds)) sum += this.speciesBiomass(id);
     return sum;
   }
 
@@ -376,7 +472,7 @@ export class World {
   biomassInRadius(x: number, y: number, radius: number): number {
     const r2 = radius * radius;
     let total = 0;
-    for (const id of this.config.roster) {
+    for (const id of [...this.config.roster].sort(compareIds)) {
       const field = this.biomassFields.get(id);
       if (!field) continue;
       const x0 = clamp(Math.floor(x - radius), 0, field.width - 1);
@@ -413,7 +509,7 @@ export class World {
       const dx = agent.x - x;
       const dy = agent.y - y;
       const d2 = dx * dx + dy * dy;
-      if (d2 <= bestDist) {
+      if (d2 < bestDist || (d2 === bestDist && agent.id < (best?.id ?? Number.POSITIVE_INFINITY))) {
         bestDist = d2;
         best = agent;
       }
@@ -424,7 +520,7 @@ export class World {
   /** Organisms within `radius` of a point, grouped by species (probe sampling, area surveys). */
   censusAround(x: number, y: number, radius: number): Record<SpeciesId, number> {
     const out: Record<SpeciesId, number> = {};
-    for (const id of this.config.roster) out[id] = 0;
+    for (const id of [...this.config.roster].sort(compareIds)) out[id] = 0;
     const r2 = radius * radius;
     for (const agent of this.agents) {
       const dx = agent.x - x;
@@ -436,25 +532,24 @@ export class World {
 
   // ---------------------------------------------------------------- tick loop
 
-  /** Advances the world by one tick. */
+  /**
+   * Advances one fixed discrete turn. Each phase reads the phase-start cohort in stable id order.
+   * Births are queued until state update, and deaths are resolved after reproduction, so a newly
+   * created organism never receives an accidental extra update because it was appended to an array.
+   */
   step(): void {
     this.tick++;
-    this.applyPulses();
-    advanceFields(this.fields, this.config, this.diffusion, this.relaxation);
-    this.decayBiomass();
-    this.rebuildBuckets();
+    this.pendingDeaths.clear();
+    const cohort = this.agents.filter((agent) => agent.alive).sort(compareAgents);
 
-    const list = this.agents;
-    for (let i = 0; i < list.length; i++) {
-      const agent = list[i] as Agent;
-      if (agent.alive) this.updateAgent(agent);
-    }
-
-    this.compact();
-    this.detectExtinctions();
-
-    if (this.tick % SAMPLE_INTERVAL === 0) this.sampleHistory();
-    if (this.tick % PROBE_INTERVAL === 0) this.sampleProbes();
+    this.environmentPhase();
+    this.resourceAvailabilityPhase();
+    this.rebuildBuckets(cohort);
+    const turnStates = this.metabolismPhase(cohort);
+    this.interactionsPhase(turnStates);
+    const births = this.reproductionPhase(turnStates);
+    this.mortalityPhase(cohort);
+    this.stateUpdatePhase(births);
   }
 
   /** Runs `ticks` simulation steps (the caller budgets them per frame). */
@@ -462,6 +557,226 @@ export class World {
     const n = Math.max(0, Math.floor(ticks));
     for (let i = 0; i < n; i++) this.step();
   }
+
+  /** Phase 1: environmental pulses, terrain persistence, diffusion and declarative rules. */
+  private environmentPhase(): void {
+    this.applyPulses();
+    advanceFields(this.fields, this.config, this.diffusion, this.relaxation);
+    this.applyConfiguredRules();
+  }
+
+  /** Phase 2: replenish/diffuse water and minerals, then update standing organic biomass. */
+  private resourceAvailabilityPhase(): void {
+    advanceResourceFields(this.resources, this.config.resources, this.fields.humidity);
+    this.decayBiomass();
+  }
+
+  /** Phase 3: age/stress and the baseline metabolic drain are computed before interactions. */
+  private metabolismPhase(cohort: readonly Agent[]): AgentTurnState[] {
+    const turnStates: AgentTurnState[] = [];
+    for (const agent of cohort) {
+      if (!agent.alive) continue;
+      const traits = this.traits.get(agent.species);
+      if (!traits) {
+        this.pendingDeaths.set(agent.id, 'exposure');
+        continue;
+      }
+      const fit = this.fitnessAtPosition(traits, agent.x, agent.y);
+      agent.age++;
+      if (agent.cooldown > 0) agent.cooldown--;
+
+      const behaviour = STRESS_BEHAVIOUR[traits.stressResponse];
+      if (fit < traits.tolerance.temperature.fragile) {
+        agent.stress++;
+      } else {
+        agent.stress = Math.max(0, agent.stress - 2);
+      }
+
+      const density = this.bucketDensity(agent.x, agent.y);
+      const competition = density / DENSITY_HALF;
+      const modifier = this.modifierFor(agent.species);
+      const exposure = traits.exposureCost * (1 - fit) * behaviour.exposureScale;
+      const metabolic = traits.metabolism * (1 + COMPETITION_DRAIN * competition) * modifier.metabolism;
+      agent.energy = finite(agent.energy - metabolic - exposure);
+      turnStates.push({ agent, traits, fitness: fit, density, behaviour });
+    }
+    return turnStates;
+  }
+
+  /** Phase 4: food-web transfers and symbiosis resolve on the stable start-of-turn positions. */
+  private interactionsPhase(turnStates: readonly AgentTurnState[]): void {
+    for (const state of turnStates) {
+      const { agent, traits, fitness, density } = state;
+      if (!agent.alive || this.pendingDeaths.has(agent.id)) continue;
+      const gained = traits.dietKind === 'none'
+        ? this.photosynthesise(agent, traits, fitness, density, this.modifierFor(agent.species).growth)
+        : traits.dietKind === 'biomass'
+          ? this.graze(agent, traits, fitness, false)
+          : this.hunt(agent, traits, fitness);
+      agent.energy = finite(agent.energy + gained);
+    }
+
+    this.applySymbiosis(turnStates);
+
+    // Plan all moves against the same interaction snapshot; apply positions only after every agent
+    // has chosen. A predator's result therefore cannot depend on whether its prey was iterated first.
+    const movementPlans: AgentMovementPlan[] = [];
+    for (const state of turnStates) {
+      const { agent, traits, fitness, behaviour } = state;
+      if (!agent.alive || this.pendingDeaths.has(agent.id)) continue;
+      movementPlans.push(this.planMovement(agent, traits, fitness, behaviour.taxis));
+    }
+    for (const plan of movementPlans) {
+      plan.agent.x = plan.x;
+      plan.agent.y = plan.y;
+      plan.agent.dx = plan.dx;
+      plan.agent.dy = plan.dy;
+      const traits = this.traits.get(plan.agent.species);
+      if (traits) {
+        plan.agent.energy = finite(
+          plan.agent.energy - traits.moveCost * (plan.travelled / Math.max(0.01, traits.speed)),
+        );
+      }
+    }
+    this.rebuildBuckets(turnStates.map((state) => state.agent));
+  }
+
+  /** Phase 5: collect eligible parents and reserve cap slots; actual offspring appear in state update. */
+  private reproductionPhase(turnStates: readonly AgentTurnState[]): PendingBirth[] {
+    const births: PendingBirth[] = [];
+    const reserved = new Map<SpeciesId, number>();
+    for (const state of turnStates) {
+      const { agent, traits, fitness, behaviour } = state;
+      if (!agent.alive || this.pendingDeaths.has(agent.id)) continue;
+      if (!this.canReproduce(agent, traits, fitness, behaviour.reproGate, reserved)) continue;
+      const birth = this.reproduce(agent, traits, this.modifierFor(agent.species).reproduction);
+      if (!birth) continue;
+      births.push(birth);
+      reserved.set(birth.species, (reserved.get(birth.species) ?? 0) + 1);
+      const snapshot = this.readingsAt(birth.parentX, birth.parentY);
+      const moments = this.birthMoments.get(birth.species);
+      if (moments) addReading(moments, snapshot);
+      this.emit({
+        tick: this.tick,
+        kind: 'birth',
+        species: birth.species,
+        x: birth.x,
+        y: birth.y,
+        readings: snapshot,
+        message: `${birth.species} reproduced`,
+      });
+    }
+    return births;
+  }
+
+  /** Phase 6: apply deferred interaction deaths, then starvation, age and exposure mortality. */
+  private mortalityPhase(cohort: readonly Agent[]): void {
+    for (const agent of cohort) {
+      if (!agent.alive) continue;
+      const interactionCause = this.pendingDeaths.get(agent.id);
+      if (interactionCause) {
+        this.killAgent(agent, interactionCause);
+      } else if (agent.energy <= 0) {
+        this.killAgent(agent, 'starvation');
+      } else if (agent.age >= (this.traits.get(agent.species)?.lifespan ?? 0)) {
+        this.killAgent(agent, 'age');
+      } else if (agent.stress > EXPOSURE_LETHAL_TICK_LIMIT) {
+        this.killAgent(agent, 'exposure');
+      }
+    }
+  }
+
+  /** Phase 7: compact, materialize queued births, and update extinctions and public samples. */
+  private stateUpdatePhase(births: readonly PendingBirth[]): void {
+    this.compact();
+    for (const birth of births) {
+      const cap = this.config.populationCaps[birth.species] ?? Number.POSITIVE_INFINITY;
+      if (this.count(birth.species) >= cap) continue;
+      this.spawn(birth.species, birth.x, birth.y, birth.energy, birth.generation, birth.rng);
+    }
+    this.pendingDeaths.clear();
+    this.detectExtinctions();
+    if (this.tick % SAMPLE_INTERVAL === 0) this.sampleHistory();
+    if (this.tick % PROBE_INTERVAL === 0) this.sampleProbes();
+  }
+
+  /** Applies rules against one immutable observation captured after environment evolution. */
+  private applyConfiguredRules(): void {
+    for (const id of this.config.roster) {
+      this.ruleModifiers.set(id, { metabolism: 1, growth: 1, reproduction: 1 });
+    }
+    const observation: RuleObservation = {
+      tick: this.tick,
+      fieldMeans: this.fieldMeans(),
+      resourceMeans: {
+        water: this.resources.water.stats().mean,
+        nutrients: this.resources.nutrients.stats().mean,
+      },
+      populations: this.counts(),
+      biomass: this.biomassReport(),
+    };
+    for (const activation of this.ruleEngine.evaluate(observation)) {
+      this.applyRuleEffect(activation.effect);
+    }
+  }
+
+  private applyRuleEffect(effect: RuleEffect): void {
+    switch (effect.type) {
+      case 'field-shift': {
+        this.fields[effect.field].addRadial(effect.x, effect.y, effect.radius, effect.amount);
+        const limits = FIELD_LIMITS[effect.field];
+        this.fields[effect.field].clampTo(limits.min, limits.max);
+        return;
+      }
+      case 'resource-shift':
+        shiftResource(this.resources, effect.resource, effect.x, effect.y, effect.radius, effect.amount);
+        return;
+      case 'metabolism-scale':
+        this.scaleRuleModifier(effect.species, 'metabolism', effect.factor);
+        return;
+      case 'growth-scale':
+        this.scaleRuleModifier(effect.species, 'growth', effect.factor);
+        return;
+      case 'reproduction-scale':
+        this.scaleRuleModifier(effect.species, 'reproduction', effect.factor);
+        return;
+    }
+  }
+
+  private scaleRuleModifier(species: SpeciesId, key: keyof SpeciesRuleModifier, factor: number): void {
+    const current = this.ruleModifiers.get(species);
+    if (!current) return;
+    current[key] = clamp(current[key] * factor, 0.1, 4);
+  }
+
+  private modifierFor(species: SpeciesId): Readonly<SpeciesRuleModifier> {
+    return this.ruleModifiers.get(species) ?? BASE_RULE_MODIFIER;
+  }
+
+  /**
+   * Symbiosis is data-driven and pairwise. Each configured symbiont shares an energy benefit with
+   * each nearby partner; both bonuses are capped by the recipient's configured energy capacity.
+   */
+  private applySymbiosis(turnStates: readonly AgentTurnState[]): void {
+    const partners: Agent[] = [];
+    for (const state of turnStates) {
+      const { agent, traits } = state;
+      const bond = traits.symbiosis;
+      if (!bond || !agent.alive || this.pendingDeaths.has(agent.id)) continue;
+      partners.length = 0;
+      this.collectNearby(agent.x, agent.y, bond.radius, partners, bond.partner, agent);
+      if (partners.length === 0) continue;
+      const selfRoom = Math.max(0, traits.maxEnergy - agent.energy);
+      agent.energy = finite(agent.energy + Math.min(selfRoom, bond.selfEnergyBonus * partners.length));
+      for (const partner of partners) {
+        const partnerTraits = this.traits.get(partner.species);
+        if (!partnerTraits || this.pendingDeaths.has(partner.id)) continue;
+        const partnerRoom = Math.max(0, partnerTraits.maxEnergy - partner.energy);
+        partner.energy = finite(partner.energy + Math.min(partnerRoom, bond.partnerEnergyBonus));
+      }
+    }
+  }
+
 
   private applyPulses(): void {
     // The field effect comes from the shared scheduler (the same one the climate sampler uses, so a
@@ -500,12 +815,11 @@ export class World {
     }
   }
 
-  private rebuildBuckets(): void {
+  private rebuildBuckets(agents: readonly Agent[] = this.agents): void {
     for (const bucket of this.buckets) bucket.length = 0;
-    const list = this.agents;
-    for (let i = 0; i < list.length; i++) {
-      const agent = list[i] as Agent;
-      if (!agent.alive) continue;
+    const stableAgents = [...agents].sort(compareAgents);
+    for (const agent of stableAgents) {
+      if (!agent.alive || this.pendingDeaths.has(agent.id)) continue;
       const bucket = this.buckets[this.bucketIndex(agent.x, agent.y)];
       if (bucket) bucket.push(agent);
     }
@@ -547,77 +861,13 @@ export class World {
     return n;
   }
 
-  // ---------------------------------------------------------------- agent update
-
-  private updateAgent(agent: Agent): void {
-    const traits = this.traits.get(agent.species);
-    if (!traits) {
-      this.killAgent(agent, 'exposure');
-      return;
-    }
-    const readings = this.scratchReadings;
-    readings.temperature = this.fields.temperature.sampleBilinear(agent.x, agent.y);
-    readings.humidity = this.fields.humidity.sampleBilinear(agent.x, agent.y);
-    readings.light = this.fields.light.sampleBilinear(agent.x, agent.y);
-    const fit = fitnessAt(traits, readings);
-
-    agent.age++;
-    if (agent.cooldown > 0) agent.cooldown--;
-
-    const behaviour = STRESS_BEHAVIOUR[traits.stressResponse];
-    if (fit < traits.tolerance.temperature.fragile) {
-      agent.stress++;
-    } else {
-      agent.stress = Math.max(0, agent.stress - 2);
-    }
-
-    const density = this.bucketDensity(agent.x, agent.y);
-
-    // --- feeding ---
-    // Every branch assigns, so the initialiser would only ever be dead code.
-    const gained =
-      traits.dietKind === 'none'
-        ? this.photosynthesise(agent, traits, fit, density)
-        : traits.dietKind === 'biomass'
-          ? this.graze(agent, traits, fit, false)
-          : this.hunt(agent, traits, fit);
-    agent.energy = finite(agent.energy + gained);
-
-    // --- movement ---
-    const travelled = this.moveAgent(agent, traits, fit, behaviour.taxis);
-
-    // --- metabolism ---
-    // Crowding also raises the cost of living (competition for space, trampling, disease pressure),
-    // which is what gives every species a real carrying capacity below its hard cap.
-    const exposure = traits.exposureCost * (1 - fit) * behaviour.exposureScale;
-    const competition = density / DENSITY_HALF;
-    const drain =
-      traits.metabolism * (1 + COMPETITION_DRAIN * competition) +
-      exposure +
-      traits.moveCost * (travelled / Math.max(0.01, traits.speed));
-    agent.energy -= drain;
-
-    // --- reproduction ---
-    if (this.canReproduce(agent, traits, fit, behaviour.reproGate)) {
-      this.reproduce(agent, traits);
-    }
-
-    // --- death ---
-    if (agent.energy <= 0) {
-      this.killAgent(agent, 'starvation');
-    } else if (agent.age >= traits.lifespan) {
-      this.killAgent(agent, 'age');
-    } else if (agent.stress > EXPOSURE_LETHAL_TICK_LIMIT) {
-      this.killAgent(agent, 'exposure');
-    }
-  }
-
   /** Photosynthesis analogue: growth scales with fitness and falls off in saturated biomass. */
   private photosynthesise(
     agent: Agent,
     traits: SpeciesTraits,
     fit: number,
     density: number,
+    growthMultiplier: number,
   ): number {
     if (fit <= 0) return 0;
     const field = this.biomassFields.get(agent.species);
@@ -630,14 +880,35 @@ export class World {
     // every population pinned to its hard cap and the world froze into a static state (measured
     // with `npm run balance`). Space, not the cap, must be the limiting factor.
     const crowding = 1 / (1 + density / DENSITY_HALF);
-    const gain = traits.growthRate * fit * saturation * crowding;
+    const potential = traits.growthRate * fit * saturation * crowding * growthMultiplier;
     const room = Math.max(0, traits.maxEnergy - agent.energy);
-    const actual = Math.min(gain, room);
-    if (field && actual > 0) {
-      const deposited = Math.min(actual * traits.depositRatio, BIOMASS_CELL_LIMIT);
-      field.addAt(agent.x, agent.y, deposited);
-      if (field.getAt(agent.x, agent.y) > BIOMASS_CELL_LIMIT) {
-        field.setAt(agent.x, agent.y, BIOMASS_CELL_LIMIT);
+    const needs = traits.resourceNeeds;
+    const water = this.resources.water.getAt(agent.x, agent.y);
+    const nutrients = this.resources.nutrients.getAt(agent.x, agent.y);
+    const byWater = needs.waterPerEnergy > 0 ? water / needs.waterPerEnergy : potential;
+    const byNutrients = needs.nutrientsPerEnergy > 0 ? nutrients / needs.nutrientsPerEnergy : potential;
+    const actual = Math.min(potential, room, byWater, byNutrients);
+    if (actual > 0) {
+      if (needs.waterPerEnergy > 0) {
+        this.resources.water.setAt(
+          agent.x,
+          agent.y,
+          clamp(water - actual * needs.waterPerEnergy, RESOURCE_LIMITS.water.min, RESOURCE_LIMITS.water.max),
+        );
+      }
+      if (needs.nutrientsPerEnergy > 0) {
+        this.resources.nutrients.setAt(
+          agent.x,
+          agent.y,
+          clamp(nutrients - actual * needs.nutrientsPerEnergy, RESOURCE_LIMITS.nutrients.min, RESOURCE_LIMITS.nutrients.max),
+        );
+      }
+      if (field) {
+        const deposited = Math.min(actual * traits.depositRatio, BIOMASS_CELL_LIMIT);
+        field.addAt(agent.x, agent.y, deposited);
+        if (field.getAt(agent.x, agent.y) > BIOMASS_CELL_LIMIT) {
+          field.setAt(agent.x, agent.y, BIOMASS_CELL_LIMIT);
+        }
       }
     }
     return actual;
@@ -670,9 +941,25 @@ export class World {
     const taken = Math.min(demand * saturationFactor, bestAvailable, room / ASSIMILATION);
     if (taken <= 0) return 0;
     this.removeFromPatch(field, agent.x, agent.y, radius, taken, bestAvailable);
-    // Tissue damage: grazers only partly hurt the organisms that built the mat (see GRAZE_TISSUE_LOSS).
-    if (browseFallback || this.traits.get(bestSpecies)?.dietKind === 'none') {
+    // Tissue damage: ordinary grazers partly hurt the organisms that built the mat. A decomposer
+    // processes organic stock without attacking living producer agents directly.
+    if (
+      traits.strategy !== 'decomposer' &&
+      (browseFallback || this.traits.get(bestSpecies)?.dietKind === 'none')
+    ) {
       this.drainPreyIndividuals(agent, bestSpecies, taken * GRAZE_TISSUE_LOSS, radius);
+    }
+    if (traits.strategy === 'decomposer') {
+      const nutrients = this.resources.nutrients.getAt(agent.x, agent.y);
+      this.resources.nutrients.setAt(
+        agent.x,
+        agent.y,
+        clamp(
+          nutrients + taken * traits.decompositionYield,
+          RESOURCE_LIMITS.nutrients.min,
+          RESOURCE_LIMITS.nutrients.max,
+        ),
+      );
     }
     this.recordIntake(agent.species, bestSpecies, taken);
     return taken * ASSIMILATION;
@@ -698,7 +985,7 @@ export class World {
     const baseEfficiency = browseFallback ? 0.7 : 1;
     const roleScavenge = SCAVENGE_BY_ROLE[traits.role];
     let best: { species: SpeciesId; efficiency: number; available: number } | null = null;
-    for (const id of this.config.roster) {
+    for (const id of [...this.config.roster].sort(compareIds)) {
       const candidateTraits = this.traits.get(id);
       if (!candidateTraits) continue;
       const isDiet = traits.diet.includes(id);
@@ -784,7 +1071,7 @@ export class World {
     for (const victim of victims) {
       const taken = Math.min(victim.energy, (victim.energy / totalEnergy) * energy);
       victim.energy -= taken;
-      if (victim.energy <= 0) this.killAgent(victim, 'grazed');
+      if (victim.energy <= 0) this.pendingDeaths.set(victim.id, 'grazed');
     }
   }
 
@@ -803,7 +1090,7 @@ export class World {
     let bestDist = Number.POSITIVE_INFINITY;
     for (const candidate of candidates) {
       const d = Math.hypot(candidate.x - agent.x, candidate.y - agent.y);
-      if (d < bestDist) {
+      if (d < bestDist || (d === bestDist && candidate.id < (victim?.id ?? Number.POSITIVE_INFINITY))) {
         bestDist = d;
         victim = candidate;
       }
@@ -813,7 +1100,8 @@ export class World {
     // A strike can fail: the prey escapes. This is the single most important stabiliser of the
     // predator/prey interaction — without it, predation becomes a pure energy pump that erases the
     // prey population (measured with `npm run trace -- VOX-9 SCU-4`: 34 of 36 grazers killed).
-    if (traits.captureChance < 1 && !this.rng.chance(traits.captureChance)) {
+    const huntRng = this.rng.fork('hunt', agent.id).fork('tick', this.tick);
+    if (traits.captureChance < 1 && !huntRng.chance(traits.captureChance)) {
       // A failed chase is not a wasted tick: the animal gives up on the hunt and scavenges what it
       // can reach. Without this fallback a predator whose strikes miss a few times in a row loses
       // energy with prey in plain sight (`npm run trace -- VOX-9 GLI-3`).
@@ -836,7 +1124,7 @@ export class World {
         readings: this.readingsAt(victim.x, victim.y),
       });
       bump(this.counters.kills, `${agent.species}->${victim.species}`);
-      this.killAgent(victim, 'predation');
+      this.pendingDeaths.set(victim.id, 'predation');
     }
     return taken * PREDATION_ASSIMILATION;
   }
@@ -859,7 +1147,7 @@ export class World {
         const bucket = this.buckets[row * this.bucketCols + col];
         if (!bucket) continue;
         for (const agent of bucket) {
-          if (agent === exclude || !agent.alive) continue;
+          if (agent === exclude || !agent.alive || this.pendingDeaths.has(agent.id)) continue;
           if (species && agent.species !== species) continue;
           if (allowed && !allowed.includes(agent.species)) continue;
           const dx = agent.x - x;
@@ -880,55 +1168,53 @@ export class World {
     bump(this.counters.grazingRemoved, prey, amount);
   }
 
-  /** Movement: taxis toward better fitness when stressed, otherwise a correlated random walk. */
-  private moveAgent(
+  /** Plans movement without mutating shared positions; plans are committed as a separate pass. */
+  private planMovement(
     agent: Agent,
     traits: SpeciesTraits,
     fit: number,
     taxisMultiplier: number,
-  ): number {
+  ): AgentMovementPlan {
     const stressed = fit < 0.72;
-    // A hungry consumer also forages: without this, grazers standing on an empty cell never reach
-    // the food a few cells away and every consumer species dies out within a few hundred ticks
-    // (measured with `npm run balance`).
     const hungry =
       traits.dietKind !== 'none' && agent.energy < traits.reproEnergy * 0.95 && fit > 0.15;
+    let dx = agent.dx;
+    let dy = agent.dy;
     if ((this.tick + agent.id) % MOVE_DECISION_INTERVAL === 0) {
-      const dir =
-        stressed || hungry ? this.bestDirection(agent, traits, hungry && !stressed) : null;
-      if (dir) {
-        agent.dx = dir.dx;
-        agent.dy = dir.dy;
+      const direction = stressed || hungry ? this.bestDirection(agent, traits, hungry && !stressed) : null;
+      if (direction) {
+        dx = direction.dx;
+        dy = direction.dy;
       } else {
-        this.wander(agent, traits);
+        const wandered = this.wanderDirection(agent, traits);
+        dx = wandered.dx;
+        dy = wandered.dy;
       }
     }
+
     const speed = traits.speed * (stressed ? taxisMultiplier : 1);
-    const nx = agent.x + agent.dx * speed;
-    const ny = agent.y + agent.dy * speed;
-    const clampedX = clamp(nx, 0.5, this.config.width - 0.5);
-    const clampedY = clamp(ny, 0.5, this.config.height - 0.5);
-    if (clampedX !== nx) agent.dx = -agent.dx;
-    if (clampedY !== ny) agent.dy = -agent.dy;
-    if (this.blockedByBarrier(agent.x, agent.y, clampedX, clampedY)) {
-      agent.dx = -agent.dx;
-      agent.dy = -agent.dy;
-      return 0;
+    const nx = agent.x + dx * speed;
+    const ny = agent.y + dy * speed;
+    const x = clamp(nx, 0.5, this.config.width - 0.5);
+    const y = clamp(ny, 0.5, this.config.height - 0.5);
+    if (x !== nx) dx = -dx;
+    if (y !== ny) dy = -dy;
+    if (this.blockedByBarrier(agent.x, agent.y, x, y)) {
+      return { agent, x: agent.x, y: agent.y, dx: -dx, dy: -dy, travelled: 0 };
     }
-    agent.x = clampedX;
-    agent.y = clampedY;
-    return speed;
+    return { agent, x, y, dx, dy, travelled: speed };
   }
 
-  private wander(agent: Agent, traits: SpeciesTraits): void {
-    const turn = this.movementRng.gauss() * traits.wander;
+  /** Per-agent, per-tick wandering stream; unrelated organisms never consume this sequence. */
+  private wanderDirection(agent: Agent, traits: SpeciesTraits): { dx: number; dy: number } {
+    const turnRng = this.movementRng.fork('agent', agent.id).fork('tick', this.tick);
+    const turn = turnRng.gauss() * traits.wander;
     const cos = Math.cos(turn);
     const sin = Math.sin(turn);
     const nx = agent.dx * cos - agent.dy * sin;
     const ny = agent.dx * sin + agent.dy * cos;
     const norm = Math.hypot(nx, ny) || 1;
-    agent.dx = nx / norm;
-    agent.dy = ny / norm;
+    return { dx: nx / norm, dy: ny / norm };
   }
 
   /**
@@ -980,7 +1266,7 @@ export class World {
         if (field) total += this.patchBiomass(field, x, y, radius);
       }
       if (traits.role === 'filter') {
-        for (const id of this.config.roster) {
+        for (const id of [...this.config.roster].sort(compareIds)) {
           if (traits.diet.includes(id)) continue;
           if (this.traits.get(id)?.dietKind !== 'none') continue;
           const field = this.biomassFields.get(id);
@@ -1007,7 +1293,7 @@ export class World {
         const bucket = this.buckets[row * this.bucketCols + col];
         if (!bucket) continue;
         for (const agent of bucket) {
-          if (!species.includes(agent.species)) continue;
+          if (!agent.alive || this.pendingDeaths.has(agent.id) || !species.includes(agent.species)) continue;
           const dx = agent.x - x;
           const dy = agent.y - y;
           if (dx * dx + dy * dy <= r2) n++;
@@ -1022,6 +1308,7 @@ export class World {
     traits: SpeciesTraits,
     fit: number,
     reproGate: number,
+    reservedBirths: ReadonlyMap<SpeciesId, number>,
   ): boolean {
     if (agent.cooldown > 0) return false;
     if (agent.age < traits.maturity) return false;
@@ -1032,34 +1319,39 @@ export class World {
       if (this.foodScoreAt(traits, agent.x, agent.y) < gate) return false;
     }
     const cap = this.config.populationCaps[agent.species] ?? Number.POSITIVE_INFINITY;
-    return this.count(agent.species) < cap;
+    return this.count(agent.species) + (reservedBirths.get(agent.species) ?? 0) < cap;
   }
 
-  private reproduce(agent: Agent, traits: SpeciesTraits): void {
-    const rng = this.rng.fork('birth', agent.id + agent.generation * 7919 + this.tick % 97);
+  private reproduce(
+    agent: Agent,
+    traits: SpeciesTraits,
+    reproductionScale: number,
+  ): PendingBirth | null {
+    const rng = this.rng
+      .fork('birth', agent.id)
+      .fork('generation', agent.generation)
+      .fork('tick', this.tick);
     const x = clamp(agent.x + rng.around(1.6), 0.5, this.config.width - 0.5);
     const y = clamp(agent.y + rng.around(1.6), 0.5, this.config.height - 0.5);
     if (this.nearbyCount(x, y, 2) > LOCAL_BREEDING_LIMIT) {
-      agent.cooldown = Math.floor(traits.reproCooldown * 0.35);
-      return;
+      agent.cooldown = Math.max(1, Math.floor((traits.reproCooldown * 0.35) / reproductionScale));
+      return null;
     }
     const paid = Math.min(agent.energy * 0.5, traits.reproCost);
     agent.energy -= paid;
-    agent.cooldown = traits.reproCooldown;
+    agent.cooldown = Math.max(1, Math.round(traits.reproCooldown / reproductionScale));
     const childEnergy = Math.max(1, paid * (1 + rng.gauss() * traits.variance));
-    this.spawn(agent.species, x, y, childEnergy, agent.generation + 1, rng);
-    const snapshot = this.readingsAt(agent.x, agent.y);
-    const moments = this.birthMoments.get(agent.species);
-    if (moments) addReading(moments, snapshot);
-    this.emit({
-      tick: this.tick,
-      kind: 'birth',
+    return {
+      parentId: agent.id,
       species: agent.species,
       x,
       y,
-      readings: snapshot,
-      message: `${agent.species} reproduced`,
-    });
+      parentX: agent.x,
+      parentY: agent.y,
+      energy: childEnergy,
+      generation: agent.generation + 1,
+      rng,
+    };
   }
 
   private spawn(
@@ -1143,7 +1435,7 @@ export class World {
 
   /** Rebuilds the per-species population counters from the living set (self-healing invariant). */
   private recount(): void {
-    for (const id of this.config.roster) this.populationCounts.set(id, 0);
+    for (const id of [...this.config.roster].sort(compareIds)) this.populationCounts.set(id, 0);
     const list = this.agents;
     for (let i = 0; i < list.length; i++) {
       const agent = list[i] as Agent;
@@ -1153,7 +1445,7 @@ export class World {
   }
 
   private detectExtinctions(): void {
-    for (const species of this.config.roster) {
+    for (const species of [...this.config.roster].sort(compareIds)) {
       const alive = this.count(species);
       const index = this.extinctions.indexOf(species);
       if (alive === 0 && index < 0) {
@@ -1230,7 +1522,7 @@ export class World {
     const perSpecies: Record<SpeciesId, number> = {};
     let removed = 0;
     const r2 = radius * radius;
-    for (const agent of this.agents) {
+    for (const agent of [...this.agents].sort(compareAgents)) {
       if (!agent.alive) continue;
       if (species && agent.species !== species) continue;
       const dx = agent.x - x;
@@ -1372,7 +1664,7 @@ export class World {
     const counts = this.counts();
     const biomass = this.biomassReport();
     let total = 0;
-    for (const id of this.config.roster) total += biomass[id] ?? 0;
+    for (const id of [...this.config.roster].sort(compareIds)) total += biomass[id] ?? 0;
     this.history.push({ tick: this.tick, counts, biomass, totalBiomass: total });
     if (this.history.length > this.historyCapacity) this.history.shift();
   }
@@ -1450,6 +1742,7 @@ export class World {
       stability: this.stability(),
       barriers: this.barriers,
       fields: this.fields,
+      resources: this.resources,
       biomassFields: this.biomassFields,
       extinctions: this.extinctions,
     };
@@ -1459,6 +1752,58 @@ export class World {
     const stored = this.events.push(event);
     countEvent(this.counters, stored);
   }
+}
+
+function snapshotSpeciesTraits(traits: SpeciesTraits): SpeciesTraits {
+  const snapshot: SpeciesTraits = {
+    ...traits,
+    diet: [...traits.diet],
+    tolerance: {
+      temperature: { ...traits.tolerance.temperature },
+      humidity: { ...traits.tolerance.humidity },
+      light: { ...traits.tolerance.light },
+    },
+    resourceNeeds: { ...traits.resourceNeeds },
+    symbiosis: traits.symbiosis ? { ...traits.symbiosis } : null,
+  };
+  return deepFreeze(snapshot);
+}
+
+function snapshotWorldConfig(
+  config: WorldConfig,
+  rules: readonly EcosystemRule[],
+): WorldConfig {
+  const snapshot: WorldConfig = {
+    ...config,
+    baseline: { ...config.baseline },
+    resources: {
+      water: { ...config.resources.water },
+      nutrients: { ...config.resources.nutrients },
+    },
+    sources: config.sources.map((source) => ({ ...source })),
+    pulses: config.pulses.map((pulse) => ({ ...pulse })),
+    rules: [...rules],
+    roster: [...config.roster],
+    initialPopulations: { ...config.initialPopulations },
+    populationCaps: { ...config.populationCaps },
+    biomassTarget: { ...config.biomassTarget },
+    instruments: [...config.instruments],
+  };
+  return deepFreeze(snapshot);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  return Object.freeze(value);
+}
+
+function compareIds(a: SpeciesId, b: SpeciesId): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function compareAgents(a: Agent, b: Agent): number {
+  return a.id - b.id;
 }
 
 /** Segment intersection (standard orientation test) used by containment barriers. */

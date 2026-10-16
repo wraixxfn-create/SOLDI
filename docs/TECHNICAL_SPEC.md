@@ -41,8 +41,9 @@ sola lettura per contratto.
 
 | Modello | Campi essenziali | Proprietario |
 |---|---|---|
-| `SpeciesDefinition` / `SpeciesTraits` | id, nome/codice, ruolo e dieta, tolleranze per temperatura/umidità/luce (`ideal`, `width`, `fragile`), risposta allo stress, energia, metabolismo, riproduzione, movimento e resa visiva | `content/species.ts`; tipi e fitness in `core/sim/species.ts` |
-| `SectorConfig` | id/indice, dimensioni, seed, valori ambientali di base, sorgenti e impulsi, roster, popolazioni iniziali/cap, budget, obiettivo biomassa, durata in tick e strumenti disponibili | `content/sectors.ts`; schema e validazione in `core/sim/sector.ts` |
+| `SpeciesDefinition` / `SpeciesTraits` | id, ruolo, strategia ecologica, dieta e partner, tolleranze, consumo idrico/minerale, energia, metabolismo, riproduzione, mortalità, mobilità e parametri d'interazione | `content/species.ts`; tipi e fitness in `core/sim/species.ts` |
+| `SectorConfig` (configurazione completa del mondo) | territorio finito in celle, seed, clima e limiti, stock iniziali di acqua/nutrienti, sorgenti, impulsi, roster, popolazioni/cap e regole tipizzate; include inoltre budget/obiettivo/durata della missione | `content/sectors.ts`; schema e validazione in `core/sim/sector.ts` e `core/sim/resources.ts` |
+| `EcosystemRule` | id, priorità, modalità `stack`/`exclusive`, frequenza `each-turn`/`once`, prerequisiti AST ed effetti enumerati | `core/sim/rules.ts`; il parser accetta solo dati e non codice eseguibile |
 | `Proposition` | id, tipo (`role`, `tolerance`, `trophic`, `reproDriver`, `stress`), specie, opzioni, id corretto, motivazione, evidenze, peso e costo assist | derivato in `content/laws.ts` dai tratti e dall'osservazione canonica |
 | `InstrumentSpec` | id, costi Carica/Integrità, requisito specie, distruttività, scorciatoia | `game/instruments.ts` |
 
@@ -53,12 +54,13 @@ all'avvio/import; il catalogo delle proposizioni deve riferirsi a specie del ros
 
 | Modello | Dati | Regole di proprietà |
 |---|---|---|
-| `ScalarField` | griglia numerica per un `FieldId` (temperatura, umidità o luce) | range fisici: 150–450 K e 0–1 per gli altri campi; letture/modifiche solo tramite API campo |
-| `Agent` | id, specie, posizione, direzione, energia, età, cooldown, stress, generazione, vivo/morto | creato/aggiornato/rimosso solo da `World`; id univoco nella vita del mondo |
-| `World` | campi, biomassa per specie, agenti, roster, RNG, tick, eventi, contatori, probe, barriere e storia | singolo proprietario della simulazione; mutazioni attraverso metodi di `World` |
+| `ScalarField` | griglia per temperatura (150–450 K), umidità (saturazione 0–1) e irradiance (0–1) | limiti fisici condivisi; letture/modifiche tramite API campo |
+| `ResourceFields` | stock per cella di acqua (0–1 normalizzato) e nutrienti minerali (0–4 unità astratte) | inizializzazione/rate validati; diffusione, ricarica, evaporazione e consumo nel core |
+| `Agent` | id, specie/strategia, posizione, direzione, energia, età, cooldown, stress, generazione, vivo/morto | creato/aggiornato/rimosso solo da `World`; id univoco nella vita del mondo |
+| `World` | clima, stock, biomassa per specie, agenti, roster, RNG seeded, regole, tick, eventi, contatori, probe, barriere e storia | singolo proprietario; ogni istanza valida `SectorConfig` prima della costruzione |
 | `WorldEvent` | id monotono, tick, tipo, specie/bersaglio opzionali, posizione, causa, letture ambientali, quantità/messaggio | emesso solo quando avviene un fatto simulato; coda circolare limitata e contatori aggregati separati |
 | `ProbeState` / `ProbeSample` | id, posizione, raggio, capacità e campioni con tick, campi, conteggi e biomassa | campionamento periodico; storico per probe limitato alla capacità |
-| `WorldSnapshot` | conteggi, biomassa, statistiche campo, agenti, probe, storia, stabilità, barriere, campi ed estinzioni | fotografia di lettura per render/UI; nessuna regola di gioco viene eseguita dal consumatore |
+| `WorldSnapshot` | conteggi, biomassa, statistiche campo, agenti, probe, storia, stabilità, barriere, clima, stock ed estinzioni | proiezione di lettura per render/UI; nessuna regola di gioco viene eseguita dal consumatore |
 
 `SpeciesId` è una stringa, ma il suo uso in roster, dieta, strumenti e leggi deve essere validato
 rispetto al catalogo. Gli identificatori di settore, proposizione, strumento, evento, agente, probe e
@@ -86,8 +88,10 @@ barriera non sono intercambiabili.
 | `core/rng.ts`, `math.ts` | casualità seeded e funzioni numeriche pure | `Rng` derivato da seed; nessuna sorgente casuale globale |
 | `core/field.ts` | griglia scalare e operazioni spaziali/statistiche | campionamento, diffusione, rilassamento, pulse, clamp e statistiche |
 | `core/sim/species.ts` | modello tratti e fitness/tolleranza | `fitnessAt`, `fitnessFactor`; fitness finita in `[0,1]` |
-| `core/sim/sector.ts` | schema, clima, terreno e validazione settore | `validateSector` restituisce problemi; `assertValidSector` genera `ContentError` |
-| `core/sim/world.ts` | ecosistema deterministico e stato fisico | `World.step/run`, letture, strumenti di simulazione, metriche, `snapshot()` |
+| `core/sim/sector.ts` | schema mondo/settore, clima, territorio, terreno e validazione | `validateWorldConfig` valida ogni World; `validateSector` aggiunge vincoli campagna |
+| `core/sim/resources.ts` | stock acqua/nutrienti, limiti, costruzione ed evoluzione per turno | `buildResourceFields`, `advanceResourceFields`, limiti espliciti |
+| `core/sim/rules.ts` | DSL tipizzata, parser sicuro, prerequisiti, priorità e scheduling | AST chiusa; mai `eval`/callback/script da contenuto |
+| `core/sim/world.ts` | ecosistema deterministico e stato fisico | fasi `World.step/run`, interazioni, metriche, `snapshot()` |
 | `core/sim/events.ts`, `metrics.ts` | eventi, aggregati, sonde e serie storiche | `EventLog`, `EventCounters`, campionamenti limitati e funzioni metriche |
 | `content/*` | dati campagna, specie e leggi dedotte | `SECTORS`, `SPECIES_LIST`, `propositionsFor`; nessuna logica di UI |
 | `game/instruments.ts` | catalogo e validazione/costo richieste strumenti | `validateRequest`, `checkAffordable`, `InstrumentRequest` |
@@ -111,9 +115,11 @@ Interfaccia pubblica principale: `new World({ config, species, seed, ... })`, qu
 le azioni di mondo sono invocate solo dall'orchestrazione `Mission`. Per lo stesso contenuto, seed e
 sequenza ordinata di tick/azioni, il risultato osservabile deve essere identico.
 
-Ordine logico del tick: ambiente e impulsi → sensing/fitness → alimentazione e metabolismo →
-movimento → riproduzione → morte/compattazione → contatori e campionamenti. Le implementazioni
-interne possono cambiare solo preservando l'ordine causale degli eventi e i test deterministici.
+Ordine pubblico esatto (`WORLD_TICK_PHASES`): ambiente → disponibilità delle risorse → metabolismo →
+interazioni (alimentazione, predazione, decomposizione, simbiosi e movimento pianificato) → riproduzione
+→ mortalità → aggiornamento dello stato/campionamenti. La coorte è ordinata per id; i movimenti sono
+pianificati da posizioni comuni e i nuovi organismi vengono applicati solo nell'aggiornamento finale.
+Stesse configurazione, seed e azioni ordinate producono gli stessi eventi, campi, agenti e stock.
 
 ### 4.2 Azioni missione
 
@@ -177,7 +183,11 @@ richiede incremento `SAVE_VERSION` e percorso esplicito di coercizione/migrazion
 
 | ID | Invariante | Verifica automatica |
 |---|---|---|
-| INV-01 | Stesso settore, seed e sequenza di operazioni producono gli stessi conteggi, campi, eventi e risultato. | test di determinismo world/session; nessun `Math.random` in `src/core` |
+| INV-01 | Stesso config mondo, seed e sequenza di operazioni producono gli stessi conteggi, campi, risorse, eventi e risultato, anche riordinando array equivalenti. | test `core/determinism.test.ts`; nessun `Math.random` in `src/core` |
+| INV-01a | Un World non nasce da configurazione invalida; clima, stock, territorio, popolazioni, specie e regole sono validati all'ingresso. | `validateWorldConfig`, `assertValidWorldConfig`, test `core/ecology.test.ts` |
+| INV-01b | Ogni turno esegue le sette fasi nell'ordine pubblicato; un neonato non riceve un tick extra e l'ordine di iterazione non cambia il replay. | `WORLD_TICK_PHASES`, test determinismo e viability |
+| INV-01c | Le regole importate sono dati tipizzati limitati; operazioni sconosciute o codice non vengono eseguiti. | `parseRuleSet`, test `core/rules.test.ts` e `domain/contracts.test.ts` |
+| INV-01d | Render e overlay non mutano alcuno stato di gameplay. | confronto replay headless vs. renderer in `tests/render/renderer.test.ts` |
 | INV-02 | Campo e fitness sono finiti e nei limiti documentati; fitness è `[0,1]`. | `tests/core/field.test.ts`, `species.test.ts`, `world.test.ts` |
 | INV-03 | Ogni organismo vivo ha id unico, specie nel roster e coordinate valide; la popolazione non supera il cap di specie. | test world e validazione settore |
 | INV-04 | Budget corrente non negativo; spesa totale è monotona; un fallimento non modifica né budget né mondo. | test strumenti/sessione, caso limite per ciascun motivo di rifiuto |
@@ -220,8 +230,8 @@ Una modifica è accettata quando soddisfa tutti i criteri applicabili, non solo 
 
 ### AC-02 — Ripetibilità
 - Un replay della medesima missione con lo stesso seed e le stesse azioni restituisce snapshot e
-  grading identici, senza dipendere da frequenza dei frame o orologio.
-- Verifica: test deterministico su almeno un settore e azioni che includano almeno un intervento.
+  grading identici, senza dipendere da frequenza dei frame, ordine incidentale degli array o orologio.
+- Verifica: test su configurazione/azioni seeded e confronto tra replay headless e renderer.
 
 ### AC-03 — Sicurezza economica delle azioni
 - Ogni strumento disponibile applica effetto previsto e costo corretto; ogni rifiuto lascia invariati

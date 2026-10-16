@@ -62,6 +62,10 @@ export const SECTOR_CINDER_SHELF: SectorConfig = {
   height: CINDER_HEIGHT,
   seed: 0x5eed_1001,
   baseline: { temperature: 246, humidity: 0.42, light: 0.66 },
+  resources: {
+    water: { initial: 0.44, recharge: 0.035, evaporation: 0.002, diffusion: 0.05 },
+    nutrients: { initial: 1.45, regeneration: 0.0015, diffusion: 0.035 },
+  },
   sources: [
     s(CINDER_WIDTH, CINDER_HEIGHT, 'vent-alpha', 'thermal', 0.28, 0.36, 9, 96, 0.26),
     s(CINDER_WIDTH, CINDER_HEIGHT, 'vent-beta', 'thermal', 0.7, 0.68, 8, 84, 0.26),
@@ -72,6 +76,7 @@ export const SECTOR_CINDER_SHELF: SectorConfig = {
     s(CINDER_WIDTH, CINDER_HEIGHT, 'lumen-field', 'lumen', 0.5, 0.5, 12, 0.2, 0.12),
   ],
   pulses: [],
+  rules: [],
   roster: [AURELIA.id, FERRAX.id],
   initialPopulations: { [AURELIA.id]: 130, [FERRAX.id]: 34 },
   populationCaps: { [AURELIA.id]: 700, [FERRAX.id]: 320 },
@@ -107,6 +112,10 @@ export const SECTOR_VAULT_BASIN: SectorConfig = {
   height: VAULT_HEIGHT,
   seed: 0x5eed_2002,
   baseline: { temperature: 300, humidity: 0.6, light: 0.34 },
+  resources: {
+    water: { initial: 0.62, recharge: 0.045, evaporation: 0.001, diffusion: 0.06 },
+    nutrients: { initial: 1.75, regeneration: 0.0018, diffusion: 0.04 },
+  },
   sources: [
     s(VAULT_WIDTH, VAULT_HEIGHT, 'cryo-gallery', 'cryo', 0.2, 0.24, 10, 92, 0.28),
     s(VAULT_WIDTH, VAULT_HEIGHT, 'cryo-deep', 'cryo', 0.8, 0.74, 9, 78, 0.28),
@@ -133,6 +142,7 @@ export const SECTOR_VAULT_BASIN: SectorConfig = {
       label: 'vent flare through the roof fracture',
     },
   ],
+  rules: [],
   roster: [KELPIA.id, VELLUM.id, ORSAX.id],
   initialPopulations: { [KELPIA.id]: 140, [VELLUM.id]: 40, [ORSAX.id]: 16 },
   populationCaps: { [KELPIA.id]: 700, [VELLUM.id]: 320, [ORSAX.id]: 70 },
@@ -169,6 +179,10 @@ export const SECTOR_LUMEN_REEF: SectorConfig = {
   height: REEF_HEIGHT,
   seed: 0x5eed_3003,
   baseline: { temperature: 316, humidity: 0.48, light: 0.26 },
+  resources: {
+    water: { initial: 0.5, recharge: 0.035, evaporation: 0.0025, diffusion: 0.055 },
+    nutrients: { initial: 1.8, regeneration: 0.0016, diffusion: 0.04 },
+  },
   sources: [
     s(REEF_WIDTH, REEF_HEIGHT, 'lumen-a', 'lumen', 0.3, 0.3, 14, 0.66, 0.3),
     s(REEF_WIDTH, REEF_HEIGHT, 'lumen-b', 'lumen', 0.72, 0.58, 12, 0.62, 0.3),
@@ -182,6 +196,7 @@ export const SECTOR_LUMEN_REEF: SectorConfig = {
     s(REEF_WIDTH, REEF_HEIGHT, 'cryo-chimney', 'cryo', 0.04, 0.5, 6, 58, 0.28),
   ],
   pulses: [],
+  rules: [],
   roster: [VOXA.id, SCUTA.id, MYCORRHIZA.id, GLIRRA.id],
   initialPopulations: {
     [VOXA.id]: 120,
@@ -233,6 +248,10 @@ export const SECTOR_ASHFALL: SectorConfig = {
   height: ASH_HEIGHT,
   seed: 0x5eed_4004,
   baseline: { temperature: 352, humidity: 0.36, light: 0.7 },
+  resources: {
+    water: { initial: 0.35, recharge: 0.03, evaporation: 0.006, diffusion: 0.05 },
+    nutrients: { initial: 2.05, regeneration: 0.0018, diffusion: 0.035 },
+  },
   // Two "oases" of stacked cryo + mist + shade. A niche is the intersection of all three fields:
   // KELPIA needs cold AND damp AND dim at once, so a lone cryo seep in a 352 K desert stays dead
   // (measured: 0 % liveable area before this change).
@@ -259,6 +278,7 @@ export const SECTOR_ASHFALL: SectorConfig = {
       label: 'meridian heat surge',
     },
   ],
+  rules: [],
   roster: [ORPA.id, KELPIA.id, CALYX.id, GLIRRA.id],
   initialPopulations: { [ORPA.id]: 110, [KELPIA.id]: 45, [CALYX.id]: 42, [GLIRRA.id]: 7 },
   populationCaps: { [ORPA.id]: 700, [KELPIA.id]: 320, [CALYX.id]: 320, [GLIRRA.id]: 70 },
@@ -305,6 +325,10 @@ export const SECTOR_GHOST_MERIDIAN: SectorConfig = {
   height: GHOST_HEIGHT,
   seed: 0x5eed_5005,
   baseline: { temperature: 310, humidity: 0.56, light: 0.52 },
+  resources: {
+    water: { initial: 0.58, recharge: 0.04, evaporation: 0.002, diffusion: 0.05 },
+    nutrients: { initial: 1.55, regeneration: 0.0017, diffusion: 0.04 },
+  },
   sources: [
     s(GHOST_WIDTH, GHOST_HEIGHT, 'vent-warm', 'thermal', 0.34, 0.72, 9, 68, 0.28),
     s(GHOST_WIDTH, GHOST_HEIGHT, 'cryo-trench', 'cryo', 0.76, 0.26, 9, 62, 0.28),
@@ -316,6 +340,7 @@ export const SECTOR_GHOST_MERIDIAN: SectorConfig = {
     s(GHOST_WIDTH, GHOST_HEIGHT, 'shade-gully', 'shade', 0.62, 0.88, 7, 0.3, 0.28),
   ],
   pulses: [],
+  rules: [],
   roster: [AURELIA.id, KELPIA.id, FERRAX.id, ORSAX.id, TAUROS.id],
   initialPopulations: {
     [AURELIA.id]: 110,

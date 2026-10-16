@@ -70,14 +70,17 @@ src/
 │   ├── math.ts
 │   ├── rng.ts               # PRNG seeded
 │   └── sim/
-│       ├── species.ts       # tratti, fitness e regole comportamentali
-│       ├── sector.ts        # schema/validazione settore, clima e costruzione campi
-│       ├── world.ts         # agenti, ecosistema e mutazioni del mondo
+│       ├── species.ts       # tratti, strategie, fitness e comportamento
+│       ├── sector.ts        # schema/validazione mondo, clima e terreno
+│       ├── resources.ts     # stock di acqua/nutrienti e dinamiche per turno
+│       ├── rules.ts         # AST ecologica sicura e scheduling
+│       ├── world.ts         # fasi discrete, agenti e mutazioni del mondo
 │       ├── events.ts        # eventi, ring buffer e aggregati
 │       └── metrics.ts       # probe, storia e metriche derivate
 ├── content/                 # dati authored: non è codice di schermata
 │   ├── species.ts           # catalogo specie e parametri
 │   ├── sectors.ts           # cinque configurazioni iniziali di mondo/campagna
+│   ├── starter-ecosystem.ts # mondo template con quattro strategie ecologiche
 │   ├── laws.ts              # proposizioni generate dai parametri/osservazioni
 │   └── law-fairness.ts      # audit di equità del Codex
 ├── domain/                  # contratti cross-module e validazione dati importati
@@ -105,15 +108,16 @@ tests/                       # specchiati per core, render e ui
 
 ### Responsabilità e confini logici
 
-- **Simulazione:** `core/sim/world.ts`, con `field.ts`, `rng.ts`, `sim/species.ts` ed `events.ts`.
-  Avanza la biosfera e applica trasformazioni fisiche, ma non conosce DOM, UI, Canvas, audio o SDK.
-- **Regole di gioco:** le regole ecologiche sono applicate dal core; le regole della missione (azioni,
-  costi, lifecycle, report) sono in `game/`. Le proposizioni e le regole di contenuto del Codex sono
-  in `content/laws.ts`; `game/grading.ts` calcola il risultato.
-- **Generazione/configurazione mondi:** non esiste generazione procedurale di campagna. `content/sectors.ts`
-  è la fonte autoriale dei mondi; `core/sim/sector.ts` valida i dati e costruisce i campi iniziali/clima.
-  La casualità di popolamento e comportamento è seeded in `World`. Non duplicare la configurazione
-  nello strato UI.
+- **Simulazione:** `core/sim/world.ts`, con `resources.ts`, `rules.ts`, `field.ts`, `rng.ts`, `species.ts`
+  ed `events.ts`. Ogni istanza valida la configurazione; `World.step()` esegue sette fasi discrete
+  documentate e non conosce DOM, UI, Canvas, audio o SDK.
+- **Regole di gioco:** le regole ecologiche declarative sono validate e interpretate da
+  `core/sim/rules.ts` (AST chiusa, nessun codice eseguibile); le regole missione (azioni, costi,
+  lifecycle, report) sono in `game/`. Le proposizioni Codex restano in `content/laws.ts`.
+- **Generazione/configurazione mondi:** la campagna resta authored, senza generazione procedurale.
+  `SectorConfig` contiene territorio, clima, stock iniziali di acqua/nutrienti, sorgenti, roster e regole;
+  `validateWorldConfig` è il gate di ogni `World`. `content/starter-ecosystem.ts` mostra quattro
+  strategie iniziali validate. La casualità è seeded; la UI non duplica la configurazione.
 - **Gameplay/orchestrazione:** `game/session.ts` possiede la missione e instrada le azioni verso core;
   `game/instruments.ts` è il catalogo e il validatore dei comandi, non una seconda simulazione.
 - **Rendering:** `render/renderer.ts` legge mondo e stato visuale; palette e coordinate sono

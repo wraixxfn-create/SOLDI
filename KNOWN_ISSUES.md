@@ -13,7 +13,7 @@
 
 | ID | Priorità | Rischio | Stato attuale | Prossimo passo |
 |---|---|---|---|---|
-| RISK-01 | P1 | Copertura ecologica su pochi seed | Test di viability sui seed authored e harness documentato su tre seed/settore; non è una dimostrazione su tutte le configurazioni casuali. | Eseguire `npm run balance -- 0 '' --seeds=20` e registrare output/seed falliti prima del release candidate. |
+| RISK-01 | P1 | Copertura ecologica su pochi seed | Dopo il refactor delle fasi, `tests/core/viability.test.ts` e `npm run balance -- 0 '' --seeds=3` hanno mantenuto tutte le specie vive nei 15 run testati; non è una dimostrazione su tutte le configurazioni casuali. | Eseguire `npm run balance -- 0 '' --seeds=20` e registrare output/seed falliti prima del release candidate. |
 | RISK-02 | P1 | Esperienza dei settori avanzati non confermata da playtest | I test automatici esercitano i sistemi, ma il playthrough umano documentato è soprattutto FER-1. | Giocare KEL-4, ORP-2 e TAU-7 dall'inizio al report; verificare leggibilità degli indizi, budget e tempi. |
 | RISK-03 | P1 | Browser/rendering e accessibilità reale | Renderer e DOM sono testati con un contesto Canvas registrante/jsdom; questo non equivale a browser grafico, screen reader o hardware touch. | Smoke test su almeno un browser desktop e uno mobile, tastiera e screen reader; registrare browser/versione e risultati. |
 | RISK-04 | P2 | Frame pacing su hardware di riferimento | L'harness headless misura throughput; non misura il costo integrato di rendering e aggiornamento dei pannelli su laptop datato. | Profilare TAU-7 con 600 organismi su dispositivo target; controllare frame budget e degradazione qualità. |

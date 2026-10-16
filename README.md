@@ -65,8 +65,8 @@ npm run laws
 ```text
 src/
 ├── main.ts           # bootstrap e overlay errori globali
-├── core/             # RNG, matematica, campi e simulazione deterministica
-├── content/          # specie, settori e leggi authored/verificate
+├── core/             # RNG, matematica, campi, risorse, regole e simulazione deterministica
+├── content/          # specie, settori, ecosistema starter e leggi authored/verificate
 ├── domain/           # contratti pubblici e validazione runtime degli import
 ├── game/             # missione, strumenti, scoring, store, save e audio
 ├── render/           # Canvas 2D, palette e viewport

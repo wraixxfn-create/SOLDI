@@ -1,5 +1,7 @@
 import { FIELD_IDS, type FieldId } from '../core/field.ts';
 import { validateSector, type SectorConfig, type TerrainKind, type TerrainSource, type EnvironmentalPulse } from '../core/sim/sector.ts';
+import { parseRuleSet } from '../core/sim/rules.ts';
+import type { WorldResourceConfig } from '../core/sim/resources.ts';
 import type { SpeciesDefinition, SpeciesId } from '../core/sim/species.ts';
 import { SPECIES_BY_ID } from '../content/species.ts';
 import { propositionsFor } from '../content/laws.ts';
@@ -36,8 +38,10 @@ export function validateChallengeData(
       width: sector.width,
       height: sector.height,
       baseline: sector.baseline,
+      resources: sector.resources,
       sources: sector.sources,
       pulses: sector.pulses,
+      rules: sector.rules,
     };
     const objective: Objective = {
       id: `${sector.id}:survey-objective`,
@@ -85,14 +89,22 @@ function parseSectorConfig(input: unknown): ValidationResult<SectorConfig> {
   const roster = parseStringArray(value.roster, 'roster', issues);
   const initialPopulations = parseNumberMap(value.initialPopulations, 'initialPopulations', issues);
   const populationCaps = parseNumberMap(value.populationCaps, 'populationCaps', issues);
+  const resources = parseResources(value.resources, issues);
   const sources = parseSources(value.sources, issues);
   const pulses = parsePulses(value.pulses, issues);
+  const parsedRules = parseRuleSet(value.rules, {
+    width: isFiniteNumber(value.width) ? value.width : undefined,
+    height: isFiniteNumber(value.height) ? value.height : undefined,
+    species: roster ?? [],
+  });
+  issues.push(...parsedRules.issues);
   const instruments = parseStringArray(value.instruments, 'instruments', issues);
   if (instruments) validateInstrumentIds(instruments, issues);
   const biomassTarget = parseBiomassTarget(value.biomassTarget, issues);
 
   const parts: SectorParts = {
-    baseline, roster, initialPopulations, populationCaps, sources, pulses, instruments, biomassTarget,
+    baseline, resources, roster, initialPopulations, populationCaps, sources, pulses,
+    rules: parsedRules.rules, instruments, biomassTarget,
   };
   if (!hasSectorParts(parts)) {
     return { ok: false, issues: issues.length > 0 ? issues : ['Sector data is incomplete'] };
@@ -111,8 +123,10 @@ function parseSectorConfig(input: unknown): ValidationResult<SectorConfig> {
     height: value.height as number,
     seed: value.seed as number,
     baseline: parts.baseline,
+    resources: parts.resources,
     sources: parts.sources,
     pulses: parts.pulses,
+    rules: parts.rules,
     roster: parts.roster,
     initialPopulations: parts.initialPopulations,
     populationCaps: parts.populationCaps,
@@ -129,6 +143,8 @@ function parseSectorConfig(input: unknown): ValidationResult<SectorConfig> {
 
 interface SectorParts {
   readonly baseline: Readonly<Record<FieldId, number>> | null;
+  readonly resources: WorldResourceConfig | null;
+  readonly rules: NonNullable<ReturnType<typeof parseRuleSet>['rules']>;
   readonly roster: readonly string[] | null;
   readonly initialPopulations: Record<SpeciesId, number> | null;
   readonly populationCaps: Record<SpeciesId, number> | null;
@@ -140,6 +156,8 @@ interface SectorParts {
 
 function hasSectorParts(parts: SectorParts): parts is {
   readonly baseline: Readonly<Record<FieldId, number>>;
+  readonly resources: WorldResourceConfig;
+  readonly rules: NonNullable<ReturnType<typeof parseRuleSet>['rules']>;
   readonly roster: readonly string[];
   readonly initialPopulations: Record<SpeciesId, number>;
   readonly populationCaps: Record<SpeciesId, number>;
@@ -149,7 +167,7 @@ function hasSectorParts(parts: SectorParts): parts is {
   readonly biomassTarget: Readonly<{ min: number; max: number }>;
 } {
   return Boolean(
-    parts.baseline && parts.roster && parts.initialPopulations && parts.populationCaps &&
+    parts.baseline && parts.resources && parts.roster && parts.initialPopulations && parts.populationCaps &&
     parts.sources && parts.pulses && parts.instruments && parts.biomassTarget,
   );
 }
@@ -181,6 +199,54 @@ function validateNumericFields(value: Record<string, unknown>, issues: string[])
   if (!Number.isInteger(value.difficulty) || (value.difficulty as number) < 1 || (value.difficulty as number) > 5) {
     issues.push('difficulty must be an integer in [1, 5]');
   }
+}
+
+function parseResources(input: unknown, issues: string[]): WorldResourceConfig | null {
+  const value = asRecord(input);
+  if (!value) {
+    issues.push('resources must define water and nutrients');
+    return null;
+  }
+  const water = asRecord(value.water);
+  const nutrients = asRecord(value.nutrients);
+  if (!water || !nutrients) {
+    issues.push('resources.water and resources.nutrients must be objects');
+    return null;
+  }
+  const waterKeys = ['initial', 'recharge', 'evaporation', 'diffusion'] as const;
+  const nutrientKeys = ['initial', 'regeneration', 'diffusion'] as const;
+  for (const key of waterKeys) {
+    if (!isFiniteNumber(water[key])) issues.push(`resources.water.${key} must be finite`);
+  }
+  for (const key of nutrientKeys) {
+    if (!isFiniteNumber(nutrients[key])) issues.push(`resources.nutrients.${key} must be finite`);
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== 'water' && key !== 'nutrients') issues.push(`resources has unsupported key "${key}"`);
+  }
+  for (const key of Object.keys(water)) {
+    if (!waterKeys.includes(key as (typeof waterKeys)[number])) issues.push(`resources.water has unsupported key "${key}"`);
+  }
+  for (const key of Object.keys(nutrients)) {
+    if (!nutrientKeys.includes(key as (typeof nutrientKeys)[number])) issues.push(`resources.nutrients has unsupported key "${key}"`);
+  }
+  if (
+    waterKeys.some((key) => !isFiniteNumber(water[key])) ||
+    nutrientKeys.some((key) => !isFiniteNumber(nutrients[key]))
+  ) return null;
+  return {
+    water: {
+      initial: water.initial as number,
+      recharge: water.recharge as number,
+      evaporation: water.evaporation as number,
+      diffusion: water.diffusion as number,
+    },
+    nutrients: {
+      initial: nutrients.initial as number,
+      regeneration: nutrients.regeneration as number,
+      diffusion: nutrients.diffusion as number,
+    },
+  };
 }
 
 function parseBaseline(input: unknown, issues: string[]): Readonly<Record<FieldId, number>> | null {

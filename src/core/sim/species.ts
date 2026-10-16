@@ -22,6 +22,21 @@ export const ROLE_LABELS: Readonly<Record<TrophicRole, string>> = Object.freeze(
 });
 
 export type DietKind = 'none' | 'biomass' | 'predation';
+export type EcologicalStrategy = 'photosynthetic' | 'grazer' | 'predatory' | 'filter' | 'decomposer' | 'symbiotic';
+
+/** Resource demand per unit of energy generated, expressed in the world's resource units. */
+export interface ResourceNeeds {
+  readonly waterPerEnergy: number;
+  readonly nutrientsPerEnergy: number;
+}
+
+/** Mutualism parameters; both organisms receive an energy benefit for each local pairing. */
+export interface SymbiosisConfig {
+  readonly partner: SpeciesId;
+  readonly radius: number;
+  readonly selfEnergyBonus: number;
+  readonly partnerEnergyBonus: number;
+}
 
 /**
  * How a species reacts to sustained unfavourable conditions. A *behavioural* law: directly
@@ -74,6 +89,14 @@ export interface SpeciesTraits {
   readonly code: string;
   readonly role: TrophicRole;
   readonly dietKind: DietKind;
+  /** Executable ecological behavior selected from the closed simulation strategy set. */
+  readonly strategy: EcologicalStrategy;
+  /** Resource demand per unit of gained energy; zero means the legacy species does not draw stocks. */
+  readonly resourceNeeds: ResourceNeeds;
+  /** Nutrient units mineralized per unit of detrital biomass eaten (decomposers only). */
+  readonly decompositionYield: number;
+  /** Optional mutualism; the world interprets this data without species-specific code. */
+  readonly symbiosis: SymbiosisConfig | null;
   /** Species consumed, in priority order. Empty for autotrophs. */
   readonly diet: readonly SpeciesId[];
   readonly tolerance: Readonly<Record<FieldId, Tolerance>>;
@@ -242,6 +265,7 @@ export interface SpeciesDescriptor {
   readonly code: string;
   readonly role: TrophicRole;
   readonly roleLabel: string;
+  readonly strategy: EcologicalStrategy;
   readonly color: string;
   readonly dietKind: DietKind;
 }
@@ -253,6 +277,7 @@ export function describeSpecies(def: SpeciesDefinition): SpeciesDescriptor {
     code: def.traits.code,
     role: def.traits.role,
     roleLabel: ROLE_LABELS[def.traits.role],
+    strategy: def.traits.strategy,
     color: def.traits.color,
     dietKind: def.traits.dietKind,
   };

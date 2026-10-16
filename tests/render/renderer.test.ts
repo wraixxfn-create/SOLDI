@@ -174,6 +174,35 @@ describe('renderer painting', () => {
     expect(context.count('save')).toBe(context.count('restore'));
   });
 
+  it('does not alter seeded gameplay, even when drawing every turn', () => {
+    const { renderer } = makeHarness();
+    const rendered = makeWorld(0x2345);
+    const headless = makeWorld(0x2345);
+    renderer.resize(FER);
+
+    for (let tick = 0; tick < 24; tick++) {
+      rendered.step();
+      renderer.draw(rendered, state({ overlay: FIELD_IDS[tick % FIELD_IDS.length] ?? 'temperature' }));
+      headless.step();
+    }
+    const canonical = (world: World) => ({
+      tick: world.tick,
+      counts: world.counts(),
+      biomass: world.biomassReport(),
+      agents: [...world.agents]
+        .sort((a, b) => a.id - b.id)
+        .map(({ id, species, x, y, dx, dy, energy, age, generation, stress, cooldown }) =>
+          ({ id, species, x, y, dx, dy, energy, age, generation, stress, cooldown })),
+      fields: Object.fromEntries(FIELD_IDS.map((id) => [id, Array.from(world.fields[id].data)])),
+      resources: {
+        water: Array.from(world.resources.water.data),
+        nutrients: Array.from(world.resources.nutrients.data),
+      },
+      events: world.events.toArray(),
+    });
+    expect(canonical(rendered)).toEqual(canonical(headless));
+  });
+
   it('draws organisms, labels, the cursor and the instrument target', () => {
     const { renderer, context } = makeHarness();
     const world = makeWorld();

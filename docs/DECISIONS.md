@@ -236,6 +236,35 @@ updated whenever that schema changes.
 
 ---
 
+## ADR-013 — Fasi discrete, risorse esplicite e DSL ecologica sicura
+**Date:** 2026-10-16 · **Status:** Accepted
+
+**Context.** `World` già gestiva clima, biomassa, specie e casualità seeded, ma water/minerals non erano
+stock spaziali distinti e i sistemi erano aggiornati organism-by-organism. Un array mutato o un
+organismo nato durante il loop poteva influenzare le iterazioni successive. I contenuti di livello
+avevano inoltre bisogno di esprimere risposte ambientali senza introdurre codice eseguibile.
+
+**Decision.** La configurazione del mondo include dimensioni/territorio chiuso, climate baseline,
+stock iniziali e rate di acqua/nutrienti, roster, sorgenti, impulsi e regole validate prima della
+costruzione. Il turno espone sette fasi: environment → resource availability → metabolism →
+interactions → reproduction → mortality → state update. Gli organismi sono risolti in id crescente;
+le interazioni alimentari hanno un arbitraggio stabile, le posizioni si pianificano su uno snapshot e
+si applicano in blocco, e i neonati vengono materializzati solo nell'aggiornamento finale.
+
+Le regole sono dati in una DSL chiusa: condizioni booleane e confronti tipizzati, priorità, modalità
+`stack`/`exclusive`, frequenza `each-turn`/`once` ed effetti enumerati. Un parser bounded rifiuta
+codice, callback, chiavi/operazioni sconosciute e valori fuori limite. Movimento, caccia e nascita usano
+stream RNG derivati da seed + id/tick/generazione; il renderer rimane un lettore.
+
+**Consequences.** (+) Un solo motore serve le 12 specie campagna e le quattro strategie starter; non si
+copia una funzione per specie. (+) Test di replay verificano seed, azioni, riordinamento di array e
+indipendenza dal rendering. (+) Contenuti esterni non possono eseguire codice. (−) Il nuovo ordine
+causale cambia i bilanci rispetto al loop precedente e deve rimanere coperto dai test di viability e
+`npm run balance`; interazioni concorrenti usano l'arbitraggio esplicito per ID, non simultaneità
+matematica.
+
+---
+
 ## Repaired defects (kept for the record)
 **Date:** 2026-10-16
 
