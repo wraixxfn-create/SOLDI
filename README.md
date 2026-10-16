@@ -20,8 +20,15 @@ npm install
 npm run dev        # dev server on http://0.0.0.0:5173
 ```
 
-Note: the playable shell is still being built; see `docs/REGISTRY.md` for exactly what is done,
-what is proven, and what is outstanding.
+Then open the served address and press **Begin survey**. The game is fully playable: pick a sector,
+observe, use instruments, answer the Codex propositions and file the report. Progress is saved in
+`localStorage` (no account, no server).
+
+Quick controls: `Space` play/pause · `1`–`0` instruments · arrows move the survey cursor (hold
+`Shift` to pan) · `Enter` apply the selected instrument · `O` cycle overlay · `P` drop a probe ·
+`R` recover a probe · `F` file the report · `?` help. Mouse, pen and touch all work on the map.
+
+See `docs/REGISTRY.md` for exactly what is done, what is proven, and what is outstanding.
 
 ## Commands
 

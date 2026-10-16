@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="WORLDBUG — a browser game of alien-ecosystem survey, deduction and strategy. Observe a living simulation, disturb it with a limited budget, and file a Codex report on the laws you believe govern it."
+    />
+    <title>WORLDBUG — Xenological Survey</title>
+  </head>
+  <body>
+    <noscript>
+      <p style="padding: 1rem; font-family: system-ui, sans-serif">
+        WORLDBUG is an interactive simulation and needs JavaScript. It runs entirely in your browser:
+        no account, no network connection, no tracking.
+      </p>
+    </noscript>
+
+    <div id="app">
+      <header id="topbar">
+        <h1>WORLDBUG</h1>
+        <span id="sector-heading" aria-live="polite">Xenological Survey</span>
+        <span id="clock" class="clock"></span>
+        <div class="budget" role="group" aria-label="Mission budget">
+          <span id="charge-readout" class="clock">Charge —</span>
+          <span class="meter" aria-hidden="true"><span id="charge-meter"></span></span>
+          <span id="integrity-readout" class="clock">Integrity —</span>
+          <span class="meter integrity" aria-hidden="true"><span id="integrity-meter"></span></span>
+        </div>
+      </header>
+
+      <div id="layout">
+        <aside id="left-panel" class="panel" aria-label="Mission and instruments">
+          <section id="mission-card" aria-labelledby="mission-heading">
+            <h2 id="mission-heading">Mission</h2>
+            <div id="mission-body"></div>
+          </section>
+          <section aria-labelledby="tools-heading">
+            <h2 id="tools-heading">Survey tools (free)</h2>
+            <div id="survey-tools"></div>
+          </section>
+          <section aria-labelledby="instruments-heading">
+            <h2 id="instruments-heading">Instruments</h2>
+            <ul id="instrument-list" class="plain"></ul>
+          </section>
+        </aside>
+
+        <main id="stage">
+          <div id="stage-toolbar" role="toolbar" aria-label="Survey controls">
+            <button id="play-pause" type="button" aria-pressed="false">Play</button>
+            <button id="step" type="button">Step</button>
+            <label class="clock" for="speed">Speed</label>
+            <select id="speed">
+              <option value="1">1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+              <option value="8">8×</option>
+            </select>
+            <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+            <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+            <button id="reset-view" type="button">Reset view</button>
+            <button id="open-help" type="button">Help (?)</button>
+            <span id="render-status" class="clock" role="status"></span>
+          </div>
+
+          <div id="canvas-wrap">
+            <canvas
+              id="world"
+              tabindex="0"
+              role="img"
+              aria-label="Sector map. Use the arrow keys to move the survey cursor; every reading under the cursor is also written to the text summary at the bottom of the page."
+            ></canvas>
+          </div>
+
+          <div id="legend" aria-hidden="true"></div>
+        </main>
+
+        <aside id="right-panel" class="panel" aria-label="Readouts">
+          <div class="tabs" role="tablist" aria-label="Readout panels">
+            <button id="tab-inspector" type="button" role="tab" aria-selected="true" aria-controls="panel-inspector">
+              Inspector
+            </button>
+            <button id="tab-data" type="button" role="tab" aria-selected="false" aria-controls="panel-data">
+              Data
+            </button>
+            <button id="tab-codex" type="button" role="tab" aria-selected="false" aria-controls="panel-codex">
+              Codex
+            </button>
+            <button id="tab-log" type="button" role="tab" aria-selected="false" aria-controls="panel-log">
+              Log
+            </button>
+          </div>
+
+          <section id="panel-inspector" role="tabpanel" aria-labelledby="tab-inspector">
+            <h3>Cursor</h3>
+            <div id="cursor-readout"></div>
+            <h3>Organism</h3>
+            <div id="organism-readout"></div>
+            <h3>Probes</h3>
+            <div id="probe-readout"></div>
+          </section>
+
+          <section id="panel-data" role="tabpanel" aria-labelledby="tab-data" hidden>
+            <h3>Populations</h3>
+            <div id="population-table"></div>
+            <h3>Probe recordings</h3>
+            <div id="probe-chart"></div>
+          </section>
+
+          <section id="panel-codex" role="tabpanel" aria-labelledby="tab-codex" hidden>
+            <h3>Codex propositions</h3>
+            <p id="codex-progress" class="clock"></p>
+            <div id="codex-list"></div>
+            <div class="actions"><button id="file-report" type="button">File Codex report</button></div>
+          </section>
+
+          <section id="panel-log" role="tabpanel" aria-labelledby="tab-log" hidden>
+            <h3>Event log</h3>
+            <label class="clock" for="log-filter">Filter</label>
+            <select id="log-filter"></select>
+            <ul id="log-list" class="plain"></ul>
+          </section>
+        </aside>
+      </div>
+
+      <footer id="statusbar">
+        <span id="a11y-summary" aria-live="polite"></span>
+        <span id="keyboard-hint" class="clock">
+          Space pause · 1–0 instruments · arrows move cursor · Enter apply · O overlay · P probe · F file
+        </span>
+      </footer>
+    </div>
+
+    <div id="toast" hidden></div>
+    <div id="announcer" class="visually-hidden" role="status" aria-live="polite"></div>
+    <div id="screen-root"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

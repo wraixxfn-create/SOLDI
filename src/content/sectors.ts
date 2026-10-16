@@ -76,6 +76,9 @@ export const SECTOR_CINDER_SHELF: SectorConfig = {
   initialPopulations: { [AURELIA.id]: 130, [FERRAX.id]: 34 },
   populationCaps: { [AURELIA.id]: 700, [FERRAX.id]: 320 },
   startingCharge: 10,
+  startingIntegrity: 12,
+  // natural range 614–1221 over 2600 ticks; the band is wide because this is the tutorial
+  biomassTarget: { min: 500, max: 1500 },
   surveyTicks: 2600,
   instruments: ['thermal', 'cryo', 'humidifier', 'desiccator', 'nutrient'],
   unlockAfter: null,
@@ -134,6 +137,9 @@ export const SECTOR_VAULT_BASIN: SectorConfig = {
   initialPopulations: { [KELPIA.id]: 140, [VELLUM.id]: 40, [ORSAX.id]: 16 },
   populationCaps: { [KELPIA.id]: 700, [VELLUM.id]: 320, [ORSAX.id]: 70 },
   startingCharge: 12,
+  startingIntegrity: 12,
+  // natural range 681–1170 over 3000 ticks
+  biomassTarget: { min: 500, max: 1400 },
   surveyTicks: 3000,
   instruments: ['thermal', 'cryo', 'humidifier', 'desiccator', 'illuminator', 'umbra', 'nutrient'],
   unlockAfter: 'FER-1',
@@ -185,6 +191,9 @@ export const SECTOR_LUMEN_REEF: SectorConfig = {
   },
   populationCaps: { [VOXA.id]: 700, [SCUTA.id]: 320, [MYCORRHIZA.id]: 300, [GLIRRA.id]: 70 },
   startingCharge: 13,
+  startingIntegrity: 15,
+  // natural range 2561–3566 over 3200 ticks
+  biomassTarget: { min: 2000, max: 4200 },
   surveyTicks: 3200,
   instruments: [
     'thermal',
@@ -254,6 +263,9 @@ export const SECTOR_ASHFALL: SectorConfig = {
   initialPopulations: { [ORPA.id]: 110, [KELPIA.id]: 45, [CALYX.id]: 42, [GLIRRA.id]: 7 },
   populationCaps: { [ORPA.id]: 700, [KELPIA.id]: 320, [CALYX.id]: 320, [GLIRRA.id]: 70 },
   startingCharge: 15,
+  startingIntegrity: 16,
+  // natural range 4274–6295 over 3600 ticks; the heat surge makes the standing crop swing
+  biomassTarget: { min: 3400, max: 7400 },
   surveyTicks: 3600,
   instruments: [
     'thermal',
@@ -320,6 +332,9 @@ export const SECTOR_GHOST_MERIDIAN: SectorConfig = {
     [TAUROS.id]: 420,
   },
   startingCharge: 16,
+  startingIntegrity: 20,
+  // natural range 2286–3855 over 3600 ticks; the invader makes this the least predictable sector
+  biomassTarget: { min: 1800, max: 4600 },
   surveyTicks: 3600,
   instruments: [
     'thermal',

@@ -171,6 +171,49 @@ the code, and the balance harness guards it.
 
 ---
 
+## ADR-010 — The shell is DOM panes over a canvas, driven by one action dispatcher
+**Date:** 2026-10-16 · **Status:** Accepted
+
+**Context.** The game needs a UI, an input model that works with mouse, touch and keyboard, a frame
+loop, and something that can be tested without a browser. Two shapes were considered: build the panels
+imperatively inside a framework, or keep the markup in `index.html` and have the UI layer bind to it.
+
+**Decision.** `index.html` owns the static shell (top bar, three columns, panel containers, canvas);
+`src/ui/app.ts` binds to those nodes, renders panel *contents* from the store, and routes every input
+through a single `dispatch(action)` whose handlers are a keyed table rather than a `switch`. Actions
+carry intent only; all simulation mutation goes through `Mission`. A DOM-rebuild is gated by a
+signature string of everything the panels display, so a paused game touches no DOM and a running one
+rebuilds at most once per tick — while the canvas still redraws every frame.
+
+**Consequences.** (+) The shell is testable: `tests/ui/app.test.ts` mounts the real `index.html`,
+dispatches real actions and reads the resulting DOM — no browser, no framework, no mocking of game
+logic. (+) Input is uniform: the same actions back the keyboard, the buttons and (through pointer
+events) touch. (+) The canvas is genuinely optional; with no 2D context the renderer reports it and
+the panels and text summary still carry every measurement. (−) Panel markup is built by string
+templates, so every interpolated string goes through `escapeHtml`; that is enforced by review and by
+the escaping helper being the only interpolation path.
+
+---
+
+## ADR-011 — Audio is synthesised, and the ambient bus is disposable
+**Date:** 2026-10-16 · **Status:** Accepted
+
+**Context.** The project ships zero binary assets (ADR-001), so sound must be generated. The first
+implementation leaked: the ambient drone created two oscillators and kept a reference to only one, so
+`stopAmbient()` could never silence the second, and the drone outlived the survey screen.
+
+**Decision.** `AudioBus` synthesises everything from oscillators and a deterministic noise buffer (no
+`Math.random`, so replay and tests stay reproducible), keeps *every* node it starts in a single
+reference, exposes `getStatus()` for the settings screen, and is a documented no-op when Web Audio is
+unavailable or blocked. Audio is started on the first user gesture only, as browsers require.
+
+**Consequences.** (+) No assets, no network, and the game is silent-but-working on browsers that deny
+audio. (+) The leak is structurally impossible now: one field holds everything that must be stopped.
+(−) Server-side/offline environments report "audio waiting for a gesture" forever, which is correct but
+required a status string rather than a boolean.
+
+---
+
 ## Repaired defects (kept for the record)
 **Date:** 2026-10-16
 
@@ -195,3 +238,17 @@ was silent — none of them threw, and the first three produced plausible-lookin
    passed validation and started a doomed population. Both fixed.
 6. **Public world methods failed silently on unknown species ids:** `fitnessAt` returned 0 ("dead
    zone"), `introduce` returned 0, `cull` removed nothing. All now throw.
+
+7. **The ambient drone leaked an oscillator.** `startAmbient()` created two oscillators but stored
+   only one, so `stopAmbient()` silenced half the drone and the rest kept sounding after the survey
+   ended. Both nodes are now held in the bus and stopped together (ADR-011).
+8. **The organism-label toggle was a no-op for most species.** The renderer only drew a label when the
+   species' glow value exceeded 0.3, so "Labels" visibly did nothing in the early sectors. Labels are
+   now drawn for every organism while the population is small, and only for bioluminescent species
+   above 300 living organisms (the point where the map stops being readable).
+9. **The renderer duplicated `ScalarField.paint`.** The field overlay loop reimplemented the
+   per-cell colouring inline, which meant the unit-tested `paint()` was dead code and the renderer's
+   copy was not covered. The renderer now calls `paint()`.
+10. **`loadSave` assigned a value it then overwrote** (a dead `let raw: string | null = null`), which
+   lint caught as `no-useless-assignment`; the read is now a small result-typed helper, and
+   `coerceSave`/`validateRequest` were decomposed into one function per rule.

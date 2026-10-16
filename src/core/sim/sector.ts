@@ -94,6 +94,19 @@ export interface SectorConfig {
   readonly populationCaps: Readonly<Record<SpeciesId, number>>;
 
   readonly startingCharge: number;
+  /**
+   * Integrity pool: the ecosystem's tolerance for being disturbed. Destructive instruments spend it
+   * (see docs/DESIGN.md §4.2) and it never regenerates during a mission, so the destructive tools are
+   * a one-way commitment.
+   */
+  readonly startingIntegrity: number;
+  /**
+   * Conservation target: the standing-biomass band the survey board wants to see at filing time.
+   * Authored against a measured, intervention-free run of the sector (the natural range is recorded
+   * in the sector's comment), so "leave it as you found it" scores full marks and a heavy-handed
+   * survey does not.
+   */
+  readonly biomassTarget: { readonly min: number; readonly max: number };
   readonly surveyTicks: number;
   readonly instruments: readonly string[];
   readonly unlockAfter: string | null;
@@ -210,13 +223,15 @@ export function advanceFields(
  * derived from it, so the laws describe the world the player actually plays in rather than the
  * authored intent. Cached per sector id because it is a pure function of the configuration.
  */
-const distributionCache = new Map<string, Readonly<Record<FieldId, FieldDistribution>>>();
+// Keyed by the config *object*, not by its id: two sectors that happen to share an id (a hand-built
+// variant in a test, a future user-authored sector) must never be served each other's distributions.
+const distributionCache = new WeakMap<SectorConfig, Readonly<Record<FieldId, FieldDistribution>>>();
 
 export function computeFieldDistributions(
   config: SectorConfig,
   bins = 32,
 ): Readonly<Record<FieldId, FieldDistribution>> {
-  const cached = distributionCache.get(config.id);
+  const cached = distributionCache.get(config);
   if (cached) return cached;
 
   const sampleEvery = 6;
@@ -289,7 +304,7 @@ export function computeFieldDistributions(
     humidity: buildDistribution('humidity', bins, ranges.humidity.min, ranges.humidity.max, accumulators.humidity),
     light: buildDistribution('light', bins, ranges.light.min, ranges.light.max, accumulators.light),
   };
-  distributionCache.set(config.id, result);
+  distributionCache.set(config, result);
   return result;
 }
 
@@ -354,6 +369,18 @@ export function validateSector(
   need(Number.isInteger(config.seed), `sector ${config.id}: seed must be an integer`);
   need(config.roster.length >= 2, `sector ${config.id}: needs at least two species`);
   need(config.startingCharge > 0, `sector ${config.id}: startingCharge must be positive`);
+  need(
+    Number.isInteger(config.startingIntegrity) && config.startingIntegrity > 0,
+    `sector ${config.id}: startingIntegrity must be a positive integer`,
+  );
+  need(
+    Number.isFinite(config.biomassTarget.min) && config.biomassTarget.min > 0,
+    `sector ${config.id}: biomassTarget.min must be positive`,
+  );
+  need(
+    Number.isFinite(config.biomassTarget.max) && config.biomassTarget.max > config.biomassTarget.min,
+    `sector ${config.id}: biomassTarget.max must exceed its min`,
+  );
   need(config.surveyTicks >= 600, `sector ${config.id}: surveyTicks must allow a real experiment`);
   need(config.instruments.length > 0, `sector ${config.id}: at least one instrument must be enabled`);
   need(

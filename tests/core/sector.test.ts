@@ -250,3 +250,22 @@ describe('pulses reach the world', () => {
     expect(atEpicentre()).toBeLessThan(after);
   });
 });
+
+describe('field distribution cache', () => {
+  it('never serves one sector the distributions of another with the same id', () => {
+    // The cache is keyed by the config object, so a hand-built variant that reuses an id (an authoring
+    // mistake, a test fixture, a future editor preview) must still get its own answer.
+    const base = SECTORS[0] as SectorConfig;
+    const hot: SectorConfig = {
+      ...base,
+      baseline: { ...base.baseline, temperature: base.baseline.temperature + 40 },
+    };
+    const baseDistribution = computeFieldDistributions(base, 16);
+    const hotDistribution = computeFieldDistributions(hot, 16);
+    expect(hotDistribution).not.toBe(baseDistribution);
+    expect(hotDistribution.temperature.mean).toBeGreaterThan(baseDistribution.temperature.mean);
+
+    // Re-asking returns the identical cached object (that is the point of the cache).
+    expect(computeFieldDistributions(base, 16)).toBe(baseDistribution);
+  });
+});
