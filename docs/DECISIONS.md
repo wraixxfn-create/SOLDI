@@ -214,6 +214,28 @@ required a status string rather than a boolean.
 
 ---
 
+## ADR-012 — Typed boundary contracts and runtime validation for imported data
+**Date:** 2026-10-16 · **Status:** Accepted
+
+**Context.** TypeScript types are erased at runtime, while authored sector data and browser saves can
+be loaded from untrusted JSON. The project also needs explicit contracts across simulation, gameplay,
+rendering and persistence without introducing a schema framework or weakening the dependency direction.
+
+**Decision.** Keep the existing domain models as the implementation source of truth; expose the named
+cross-system contracts in `src/domain/contracts.ts`. Treat imported challenge/save data as `unknown`,
+validate structure before constructing trusted models, then reuse `validateSector` and `coerceSave` for
+semantic/schema checks. Regenerate Codex rules from validated sector parameters instead of accepting
+answer-bearing rules from external input. Content definitions and profile records are readonly; live
+organisms and environment grids are mutable simulation state.
+
+**Consequences.** (+) No `any`, no runtime schema dependency, malformed JSON cannot enter the simulation
+unchecked, and the game rules remain derived from canonical content. (+) The domain contract tests
+assert that the concrete World and its snapshot remain structurally compatible. (−) The validator is
+explicit code that must evolve with `SectorConfig`; parser tests and the compile-time checks must be
+updated whenever that schema changes.
+
+---
+
 ## Repaired defects (kept for the record)
 **Date:** 2026-10-16
 

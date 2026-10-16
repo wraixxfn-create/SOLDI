@@ -105,6 +105,26 @@ describe('shell boot', () => {
 });
 
 describe('survey screen', () => {
+  it('renders the Canvas host and supports a deterministic reset from the report screen', () => {
+    const instance = boot();
+    act(instance, { type: 'start-sector', id: 'FER-1' });
+    expect(document.querySelector('#world')).not.toBeNull();
+
+    act(instance, { type: 'step' });
+    expect(instance.getMission()?.tick).toBe(1);
+    act(instance, { type: 'file-report' });
+    expect(instance.store.get().screen).toBe('report');
+
+    const restart = document.querySelector<HTMLButtonElement>('[data-start-sector="FER-1"]');
+    expect(restart).not.toBeNull();
+    restart?.click();
+    instance.render();
+
+    expect(instance.store.get().screen).toBe('survey');
+    expect(instance.getMission()?.tick).toBe(0);
+    expect(instance.getMission()?.world.count('AUR-3')).toBeGreaterThan(0);
+  });
+
   it('starts a mission and renders every panel from live world data', () => {
     const instance = boot();
     act(instance, { type: 'start-sector', id: 'FER-1' });
