@@ -35,12 +35,31 @@ export interface WorldResourceConfig {
 
 export type ResourceFields = Record<ResourceId, ScalarField>;
 
+/** Reject malformed authored resource settings before NaN/Infinity can enter a field. */
+export function assertValidResourceConfig(config: WorldResourceConfig): void {
+  const entries: readonly [string, unknown, number, number][] = [
+    ['water.initial', config.water?.initial, 0, 1],
+    ['water.recharge', config.water?.recharge, 0, 1],
+    ['water.evaporation', config.water?.evaporation, 0, 1],
+    ['water.diffusion', config.water?.diffusion, 0, 0.25],
+    ['nutrients.initial', config.nutrients?.initial, 0, 4],
+    ['nutrients.regeneration', config.nutrients?.regeneration, 0, 4],
+    ['nutrients.diffusion', config.nutrients?.diffusion, 0, 0.25],
+  ];
+  for (const [name, value, min, max] of entries) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
+      throw new RangeError(`Invalid resource parameter ${name}: ${String(value)} (expected ${min}..${max})`);
+    }
+  }
+}
+
 /** Builds spatial resource stocks at their explicitly authored, uniform initial values. */
 export function buildResourceFields(
   width: number,
   height: number,
   config: WorldResourceConfig,
 ): ResourceFields {
+  assertValidResourceConfig(config);
   const fields: ResourceFields = {
     water: new ScalarField(width, height, config.water.initial),
     nutrients: new ScalarField(width, height, config.nutrients.initial),
